@@ -3,9 +3,12 @@ package dev.expressive.launcher.ui
 import android.content.pm.PackageManager
 import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -26,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -35,21 +39,21 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -65,18 +69,23 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.expressive.launcher.AppEntry
 import dev.expressive.launcher.LauncherViewModel
 import dev.expressive.launcher.launchApp
 import dev.expressive.launcher.openAppInfo
 import dev.expressive.launcher.openSystemSettings
+import dev.expressive.launcher.toast
 import dev.expressive.launcher.uninstallApp
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -85,6 +94,14 @@ import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+@Immutable
+private data class ClockText(
+    val time: String,
+    val period: String,
+    val date: String,
+    val greeting: String
+)
+
 @Composable
 fun LauncherScreen(viewModel: LauncherViewModel) {
     val context = LocalContext.current
@@ -92,6 +109,10 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     val favorites by viewModel.favorites.collectAsStateWithLifecycle()
     val recents by viewModel.recents.collectAsStateWithLifecycle()
     val homeSignal by viewModel.homeSignal.collectAsStateWithLifecycle()
+    val wallpaper by viewModel.wallpaper.collectAsStateWithLifecycle()
+    val photo by viewModel.photo.collectAsStateWithLifecycle()
+    val dim by viewModel.dim.collectAsStateWithLifecycle()
+    val accentIndex by viewModel.accent.collectAsStateWithLifecycle()
 
     val isTv = remember { context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) }
     val byPackage = remember(apps) { apps.associateBy { it.packageName } }
@@ -99,11 +120,18 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     val recentApps = remember(byPackage, recents) { recents.mapNotNull { byPackage[it] } }
     val favoriteSet = remember(favorites) { favorites.toSet() }
 
-    var focused by remember { mutableStateOf<AppEntry?>(null) }
+    val focused = remember { mutableStateOf<AppEntry?>(null) }
     var menuFor by remember { mutableStateOf<AppEntry?>(null) }
+    var showSettings by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val initialFocus = remember { FocusRequester() }
+
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            viewModel.importPhoto(uri) { ok -> if (!ok) context.toast("Could not use that photo") }
+        }
+    }
 
     val now by produceState(initialValue = System.currentTimeMillis()) {
         while (true) {
@@ -111,16 +139,21 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
             delay(60_000L - value % 60_000L)
         }
     }
-    val timeText = remember(now) { DateFormat.getTimeFormat(context).format(Date(now)) }
-    val dateText = remember(now) { SimpleDateFormat("EEE, d MMM", Locale.getDefault()).format(Date(now)) }
-    val greeting = remember(now) {
+    val is24 = remember { DateFormat.is24HourFormat(context) }
+    val clock = remember(now) {
+        val date = Date(now)
         val hour = Calendar.getInstance().apply { timeInMillis = now }.get(Calendar.HOUR_OF_DAY)
-        when {
-            hour < 5 -> "Late night"
-            hour < 12 -> "Good morning"
-            hour < 18 -> "Good afternoon"
-            else -> "Good evening"
-        }
+        ClockText(
+            time = SimpleDateFormat(if (is24) "HH:mm" else "h:mm", Locale.getDefault()).format(date),
+            period = if (is24) "" else SimpleDateFormat("a", Locale.getDefault()).format(date),
+            date = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(date),
+            greeting = when {
+                hour < 5 -> "Late night"
+                hour < 12 -> "Good morning"
+                hour < 18 -> "Good afternoon"
+                else -> "Good evening"
+            }
+        )
     }
 
     val open: (AppEntry) -> Unit = { app ->
@@ -129,7 +162,11 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     }
 
     LaunchedEffect(homeSignal) {
-        if (homeSignal > 0) listState.animateScrollToItem(0)
+        if (homeSignal > 0) {
+            showSettings = false
+            menuFor = null
+            listState.animateScrollToItem(0)
+        }
     }
 
     LaunchedEffect(apps.isNotEmpty()) {
@@ -148,49 +185,30 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(Color(0xFF0F0E15))
     ) {
         val compact = maxWidth < 600.dp
         val pad = if (compact) 20.dp else 56.dp
         val cardWidth = if (compact) 156.dp else maxWidth * 0.17f
-        val glow = MaterialTheme.colorScheme.primaryContainer
-        val accent = MaterialTheme.colorScheme.tertiaryContainer
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .drawBehind {
-                    drawRect(
-                        Brush.radialGradient(
-                            colors = listOf(glow.copy(alpha = 0.6f), Color.Transparent),
-                            center = Offset(size.width * 0.9f, 0f),
-                            radius = size.maxDimension * 0.7f
-                        )
-                    )
-                    drawRect(
-                        Brush.radialGradient(
-                            colors = listOf(accent.copy(alpha = 0.35f), Color.Transparent),
-                            center = Offset(0f, size.height),
-                            radius = size.maxDimension * 0.6f
-                        )
-                    )
-                }
+        WallpaperLayer(
+            wallpaperId = wallpaper,
+            photo = photo,
+            dim = dim,
+            modifier = Modifier.fillMaxSize()
         )
+        FocusGlow(focused, Modifier.fillMaxSize())
 
         Column(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
-            TopBar(
-                time = timeText,
-                date = dateText,
-                pad = pad,
-                onFocused = { focused = null },
-                onSettings = { context.openSystemSettings() }
-            )
-            Hero(
-                focused = focused,
-                greeting = greeting,
-                hint = if (isTv) "Hold OK for options" else "Long press for options",
+            Header(
+                clock = clock,
                 compact = compact,
-                pad = pad
+                pad = pad,
+                focused = focused,
+                favorites = favoriteSet,
+                hint = if (isTv) "Hold OK for options" else "Long press for options",
+                onSettingsFocused = { focused.value = null },
+                onSettings = { showSettings = true }
             )
 
             if (apps.isEmpty()) {
@@ -220,7 +238,7 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
                                 pad = pad,
                                 favorites = favoriteSet,
                                 firstRequester = initialFocus.takeIf { firstSection == "favorites" },
-                                onFocused = { focused = it },
+                                onFocused = { focused.value = it },
                                 onOpen = open,
                                 onMenu = { menuFor = it }
                             )
@@ -235,7 +253,7 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
                                 pad = pad,
                                 favorites = favoriteSet,
                                 firstRequester = initialFocus.takeIf { firstSection == "recent" },
-                                onFocused = { focused = it },
+                                onFocused = { focused.value = it },
                                 onOpen = open,
                                 onMenu = { menuFor = it }
                             )
@@ -249,7 +267,7 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
                             pad = pad,
                             favorites = favoriteSet,
                             firstRequester = initialFocus.takeIf { firstSection == "all" },
-                            onFocused = { focused = it },
+                            onFocused = { focused.value = it },
                             onOpen = open,
                             onMenu = { menuFor = it }
                         )
@@ -257,6 +275,24 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
                 }
             }
         }
+    }
+
+    if (showSettings) {
+        SettingsPanel(
+            wallpaperId = wallpaper,
+            photo = photo,
+            dim = dim,
+            accentIndex = accentIndex,
+            onWallpaper = { viewModel.setWallpaper(it) },
+            onPickPhoto = {
+                runCatching { photoPicker.launch("image/*") }
+                    .onFailure { context.toast("No photo picker on this device") }
+            },
+            onDim = { viewModel.setDim(it) },
+            onAccent = { viewModel.setAccent(it) },
+            onSystem = { context.openSystemSettings(it) },
+            onDismiss = { showSettings = false }
+        )
     }
 
     menuFor?.let { app ->
@@ -321,115 +357,230 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
 }
 
 @Composable
-private fun TopBar(
-    time: String,
-    date: String,
+private fun FocusGlow(focused: State<AppEntry?>, modifier: Modifier) {
+    val fallback = MaterialTheme.colorScheme.primaryContainer
+    val color = animateColorAsState(
+        targetValue = focused.value?.tint ?: fallback,
+        animationSpec = tween(500),
+        label = "glow"
+    )
+    Box(
+        modifier = modifier.drawBehind {
+            drawRect(
+                Brush.radialGradient(
+                    colors = listOf(color.value.copy(alpha = 0.34f), Color.Transparent),
+                    center = Offset(size.width * 0.14f, size.height * 0.04f),
+                    radius = size.maxDimension * 0.6f
+                )
+            )
+        }
+    )
+}
+
+@Composable
+private fun Header(
+    clock: ClockText,
+    compact: Boolean,
     pad: Dp,
-    onFocused: () -> Unit,
+    focused: State<AppEntry?>,
+    favorites: Set<String>,
+    hint: String,
+    onSettingsFocused: () -> Unit,
     onSettings: () -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = pad, vertical = 16.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-            Row(
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Text(
-                    text = time,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    text = date,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+    if (compact) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = pad, vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Clock(clock, 72.sp)
+                Spacer(Modifier.weight(1f))
+                SettingsButton(onSettingsFocused, onSettings)
             }
-        }
-        Spacer(Modifier.weight(1f))
-        FocusSurface(
-            modifier = Modifier.size(56.dp),
-            idleRadius = 28.dp,
-            focusedRadius = 18.dp,
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-            focusedScale = 1.14f,
-            onFocusChange = { if (it) onFocused() },
-            onClick = onSettings
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Settings,
-                contentDescription = "Settings",
-                tint = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.align(Alignment.Center).size(26.dp)
+            Spotlight(
+                focused = focused,
+                favorites = favorites,
+                hint = hint,
+                compact = true,
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
             )
+        }
+    } else {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = pad, vertical = 8.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Clock(clock, 112.sp)
+            Spacer(Modifier.width(48.dp))
+            Spotlight(
+                focused = focused,
+                favorites = favorites,
+                hint = hint,
+                compact = false,
+                modifier = Modifier.weight(1f).padding(top = 30.dp)
+            )
+            SettingsButton(onSettingsFocused, onSettings)
         }
     }
 }
 
 @Composable
-private fun Hero(
-    focused: AppEntry?,
-    greeting: String,
+private fun Clock(clock: ClockText, size: TextUnit) {
+    Column {
+        Text(
+            text = clock.greeting,
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.tertiary
+        )
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                text = clock.time,
+                style = MaterialTheme.typography.displayLarge.copy(
+                    fontSize = size,
+                    lineHeight = size * 0.95f,
+                    fontFeatureSettings = "tnum"
+                ),
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 1
+            )
+            if (clock.period.isNotEmpty()) {
+                Text(
+                    text = clock.period,
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 10.dp, bottom = 12.dp)
+                )
+            }
+        }
+        Text(
+            text = clock.date,
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun SettingsButton(onFocused: () -> Unit, onClick: () -> Unit) {
+    val shapeAt = remember { cookieMorph(8, 0.07f, 0.12f, 1.4f) }
+    FocusSurface(
+        modifier = Modifier.size(64.dp),
+        shapeAt = shapeAt,
+        containerColor = MaterialTheme.colorScheme.primaryContainer,
+        ringColor = MaterialTheme.colorScheme.primary,
+        focusedScale = 1.16f,
+        onFocusChange = { if (it) onFocused() },
+        onClick = onClick
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Settings,
+            contentDescription = "Settings",
+            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.align(Alignment.Center).size(30.dp)
+        )
+    }
+}
+
+@Composable
+private fun Spotlight(
+    focused: State<AppEntry?>,
+    favorites: Set<String>,
     hint: String,
     compact: Boolean,
-    pad: Dp
+    modifier: Modifier
 ) {
+    val app = focused.value
     val spatial = spring<IntOffset>(dampingRatio = 0.75f, stiffness = Spring.StiffnessMediumLow)
-    val iconSize = if (compact) 64.dp else 104.dp
+    val iconSize = if (compact) 64.dp else 92.dp
+    val nameSize = if (compact) 30.sp else 46.sp
+    val base = MaterialTheme.colorScheme.surfaceContainerHigh
 
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(if (compact) 104.dp else 148.dp)
-            .padding(horizontal = pad),
+        modifier = modifier.height(if (compact) 84.dp else 118.dp),
         contentAlignment = Alignment.CenterStart
     ) {
         AnimatedContent(
-            targetState = focused,
+            targetState = app,
             transitionSpec = {
                 (fadeIn(tween(220)) + slideInVertically(spatial) { it / 3 }) togetherWith fadeOut(tween(120))
             },
-            label = "hero"
-        ) { app ->
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(20.dp)
-            ) {
-                if (app != null) {
+            label = "spotlight"
+        ) { target ->
+            if (target == null) {
+                Text(
+                    text = "Pick something to start",
+                    style = MaterialTheme.typography.headlineLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(20.dp)
+                ) {
                     Box(
                         modifier = Modifier
                             .size(iconSize)
-                            .clip(RoundedCornerShape(28.dp))
-                            .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                            .clip(CookieShape(9, 0.07f))
+                            .background(lerp(base, target.tint, 0.55f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Image(
-                            bitmap = app.icon,
+                            bitmap = target.icon,
                             contentDescription = null,
-                            modifier = Modifier.fillMaxSize(0.72f)
+                            modifier = Modifier.fillMaxSize(0.62f)
                         )
                     }
-                }
-                Column {
-                    Text(
-                        text = app?.label ?: greeting,
-                        style = if (compact) MaterialTheme.typography.headlineLarge else MaterialTheme.typography.displayMedium,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = if (app != null) hint else "Pick something to start",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Column {
+                        Text(
+                            text = target.label,
+                            style = MaterialTheme.typography.displayMedium.copy(
+                                fontSize = nameSize,
+                                lineHeight = nameSize * 1.05f
+                            ),
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Row(
+                            modifier = Modifier.padding(top = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Chip(
+                                text = if (target.isTv) "Made for TV" else "Phone app",
+                                container = MaterialTheme.colorScheme.secondaryContainer,
+                                content = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                            if (target.packageName in favorites) {
+                                Chip(
+                                    text = "Favorite",
+                                    container = MaterialTheme.colorScheme.tertiaryContainer,
+                                    content = MaterialTheme.colorScheme.onTertiaryContainer
+                                )
+                            }
+                            if (!compact) {
+                                Text(
+                                    text = hint,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 6.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun Chip(text: String, container: Color, content: Color) {
+    Box(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(container)
+            .padding(horizontal = 14.dp, vertical = 5.dp)
+    ) {
+        Text(text = text, style = MaterialTheme.typography.labelLarge, color = content)
     }
 }
 
@@ -446,14 +597,24 @@ private fun AppRow(
     onMenu: (AppEntry) -> Unit
 ) {
     Column {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = pad, top = 8.dp)
-        )
+        Row(
+            modifier = Modifier.padding(start = pad, top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            Chip(
+                text = apps.size.toString(),
+                container = MaterialTheme.colorScheme.tertiaryContainer,
+                content = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+        }
         LazyRow(
-            contentPadding = PaddingValues(horizontal = pad, vertical = 18.dp),
+            contentPadding = PaddingValues(horizontal = pad, vertical = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             itemsIndexed(apps, key = { _, app -> app.packageName }) { index, app ->
@@ -482,19 +643,24 @@ private fun AppCard(
     onLongClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
-    val labelColor by animateColorAsState(
-        targetValue = if (focused) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+    val labelAlpha = animateFloatAsState(
+        targetValue = if (focused) 1f else 0.62f,
         animationSpec = tween(160),
         label = "label"
     )
+    val shapeAt = remember { roundedMorph(24.dp, 38.dp) }
+    val base = MaterialTheme.colorScheme.surfaceContainerHigh
+    val container = remember(app.tint, base) { lerp(base, app.tint, 0.5f) }
     val banner = app.banner
+    val letter = remember(app.label) { app.label.firstOrNull()?.uppercase() ?: "" }
+    val letterSize = (width.value * 0.95f).sp
 
     Column(modifier = Modifier.width(width)) {
         FocusSurface(
             modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-            idleRadius = 22.dp,
-            focusedRadius = 34.dp,
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shapeAt = shapeAt,
+            containerColor = container,
+            ringColor = MaterialTheme.colorScheme.primary,
             focusRequester = focusRequester,
             onFocusChange = {
                 focused = it
@@ -511,25 +677,22 @@ private fun AppCard(
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
-                Box(
+                Text(
+                    text = letter,
+                    style = MaterialTheme.typography.displayLarge.copy(fontSize = letterSize, lineHeight = letterSize),
+                    color = Color.White.copy(alpha = 0.12f),
+                    maxLines = 1,
+                    modifier = Modifier.align(Alignment.BottomEnd).offset(x = 12.dp, y = 28.dp)
+                )
+                Image(
+                    bitmap = app.icon,
+                    contentDescription = null,
                     modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.linearGradient(
-                                listOf(
-                                    MaterialTheme.colorScheme.surfaceContainerHighest,
-                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
-                                )
-                            )
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Image(
-                        bitmap = app.icon,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxHeight(0.56f).aspectRatio(1f)
-                    )
-                }
+                        .align(Alignment.CenterStart)
+                        .padding(start = 18.dp)
+                        .fillMaxHeight(0.54f)
+                        .aspectRatio(1f)
+                )
             }
             if (isFavorite) {
                 Icon(
@@ -543,11 +706,13 @@ private fun AppCard(
         Spacer(Modifier.height(10.dp))
         Text(
             text = app.label,
-            style = MaterialTheme.typography.labelLarge,
-            color = labelColor,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 6.dp)
+            modifier = Modifier
+                .padding(horizontal = 8.dp)
+                .graphicsLayer { alpha = labelAlpha.value }
         )
     }
 }

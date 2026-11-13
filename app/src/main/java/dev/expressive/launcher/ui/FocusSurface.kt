@@ -2,44 +2,38 @@
 
 package dev.expressive.launcher.ui
 
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 
 @Composable
 fun FocusSurface(
     modifier: Modifier = Modifier,
-    idleRadius: Dp,
-    focusedRadius: Dp,
+    shapeAt: ShapeAt,
     containerColor: Color,
+    ringColor: Color,
     focusedScale: Float = 1.08f,
     focusRequester: FocusRequester? = null,
     onFocusChange: (Boolean) -> Unit = {},
@@ -51,38 +45,45 @@ fun FocusSurface(
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
 
-    val scale by animateFloatAsState(
-        targetValue = when {
-            pressed -> 0.95f
-            focused -> focusedScale
-            else -> 1f
-        },
-        animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMediumLow),
+    val scale = animateFloatAsState(
+        targetValue = if (pressed) 0.94f else if (focused) focusedScale else 1f,
+        animationSpec = spring(dampingRatio = 0.6f, stiffness = Spring.StiffnessMediumLow),
         label = "scale"
     )
-    val radius by animateDpAsState(
-        targetValue = if (focused) focusedRadius else idleRadius,
-        animationSpec = spring(dampingRatio = 0.7f, stiffness = Spring.StiffnessMedium),
-        label = "radius"
+    val morph = animateFloatAsState(
+        targetValue = if (focused) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
+        label = "morph"
     )
-    val ring by animateColorAsState(
-        targetValue = if (focused) MaterialTheme.colorScheme.primary else Color.Transparent,
-        animationSpec = tween(180),
-        label = "ring"
-    )
-    val shape = RoundedCornerShape(radius.coerceAtLeast(0.dp))
 
     Box(
         modifier = modifier
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
+                val s = scale.value
+                scaleX = s
+                scaleY = s
+                shape = shapeAt(morph.value, this)
+                clip = true
+                val m = morph.value.coerceIn(0f, 1f)
+                shadowElevation = 28f * m
+                spotShadowColor = ringColor
+                ambientShadowColor = ringColor
             }
-            .clip(shape)
             .background(containerColor)
-            .border(3.dp, ring, shape)
+            .drawWithContent {
+                drawContent()
+                val m = morph.value.coerceIn(0f, 1f)
+                if (m > 0.02f) {
+                    val outline = shapeAt(m, this).createOutline(size, layoutDirection, this)
+                    drawPath(
+                        path = outline.toPath(),
+                        color = ringColor.copy(alpha = m),
+                        style = Stroke(width = 6.dp.toPx())
+                    )
+                }
+            }
             .onFocusChanged { state ->
                 focused = state.isFocused
                 onFocusChange(state.isFocused)

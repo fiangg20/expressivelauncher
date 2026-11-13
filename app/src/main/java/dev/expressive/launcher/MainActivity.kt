@@ -11,7 +11,9 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.expressive.launcher.ui.LauncherScreen
 import dev.expressive.launcher.ui.LauncherTheme
 
@@ -43,7 +45,8 @@ class MainActivity : ComponentActivity() {
         viewModel.refresh()
 
         setContent {
-            LauncherTheme {
+            val accent by viewModel.accent.collectAsStateWithLifecycle()
+            LauncherTheme(accentIndex = accent) {
                 LauncherScreen(viewModel)
             }
         }
