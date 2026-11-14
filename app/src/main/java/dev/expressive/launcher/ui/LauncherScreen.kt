@@ -71,6 +71,11 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -102,6 +107,8 @@ import kotlinx.coroutines.launch
 class FocusRegistry {
     val map = HashMap<String, FocusRequester>()
     var last: String? = null
+    var lastCard: String? = null
+    var firstKey: String? = null
 }
 
 private class SidebarMemory(var value: Sidebar)
@@ -206,6 +213,7 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val registry = remember { FocusRegistry() }
+    registry.firstKey = firstKey
     val initialDone = remember { booleanArrayOf(false) }
     val depth = animateFloatAsState(
         targetValue = if (sidebarOpen) 1f else 0f,
@@ -648,7 +656,19 @@ private fun HeaderButton(
     }
     val shapeAt = remember { cookieMorph(8, 0f, 0.1f, 1.4f) }
     FocusSurface(
-        modifier = Modifier.size(if (compact) 44.dp else 56.dp),
+        modifier = Modifier
+            .size(if (compact) 44.dp else 56.dp)
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                    val firstSection = registry.firstKey?.substringBefore(":")
+                    val target = registry.lastCard
+                        ?.takeIf { it.substringBefore(":") == firstSection && registry.map.containsKey(it) }
+                        ?: registry.firstKey
+                    target != null && registry.map[target]?.tryFocus() == true
+                } else {
+                    false
+                }
+            },
         shapeAt = shapeAt,
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         focusedContainerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -689,7 +709,7 @@ private fun Spotlight(
         Crossfade(targetState = app, animationSpec = tween(180), label = "spotlight") { target ->
             if (target == null) {
                 Text(
-                    text = "Select an app",
+                    text = "Press down to browse your apps",
                     style = MaterialTheme.typography.titleLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -804,6 +824,7 @@ private fun AppItem(
         focused = has
         if (has) {
             registry.last = keyId
+            registry.lastCard = keyId
             onFocused()
         }
     }
