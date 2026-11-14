@@ -45,8 +45,8 @@ class MainActivity : ComponentActivity() {
         viewModel.refresh()
 
         setContent {
-            val accent by viewModel.accent.collectAsStateWithLifecycle()
-            LauncherTheme(accentIndex = accent) {
+            val settings by viewModel.settings.collectAsStateWithLifecycle()
+            LauncherTheme(accentIndex = settings.accent, calmMotion = settings.calmMotion) {
                 LauncherScreen(viewModel)
             }
         }

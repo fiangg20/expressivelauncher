@@ -5,18 +5,19 @@ import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.togetherWith
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -29,28 +30,23 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Star
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
@@ -65,22 +61,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.expressive.launcher.AppEntry
+import dev.expressive.launcher.LauncherPrefs
 import dev.expressive.launcher.LauncherViewModel
 import dev.expressive.launcher.launchApp
 import dev.expressive.launcher.openAppInfo
@@ -93,6 +90,16 @@ import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+class FocusRegistry {
+    val map = HashMap<String, FocusRequester>()
+    var last: String? = null
+}
+
+private class SidebarMemory(var value: Sidebar)
+
+@Immutable
+private data class Section(val id: String, val title: String, val apps: List<AppEntry>)
 
 @Immutable
 private data class ClockText(
@@ -108,24 +115,60 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     val apps by viewModel.apps.collectAsStateWithLifecycle()
     val favorites by viewModel.favorites.collectAsStateWithLifecycle()
     val recents by viewModel.recents.collectAsStateWithLifecycle()
+    val usage by viewModel.usage.collectAsStateWithLifecycle()
     val homeSignal by viewModel.homeSignal.collectAsStateWithLifecycle()
-    val wallpaper by viewModel.wallpaper.collectAsStateWithLifecycle()
+    val prefs by viewModel.settings.collectAsStateWithLifecycle()
     val photo by viewModel.photo.collectAsStateWithLifecycle()
-    val dim by viewModel.dim.collectAsStateWithLifecycle()
-    val accentIndex by viewModel.accent.collectAsStateWithLifecycle()
 
     val isTv = remember { context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) }
-    val byPackage = remember(apps) { apps.associateBy { it.packageName } }
+    val iconShape = IconShapes.getOrElse(prefs.iconShape) { IconShapes.first() }
+
+    val managerApps = remember(apps, prefs.showSystem) { apps.filter { prefs.showSystem || !it.isSystem } }
+    val visible = remember(managerApps, prefs.hidden) { managerApps.filter { it.packageName !in prefs.hidden } }
+    val byPackage = remember(visible) { visible.associateBy { it.packageName } }
+    val allApps = remember(visible, prefs.sort, usage) {
+        when (prefs.sort) {
+            1 -> visible.sortedByDescending { it.installedAt }
+            2 -> visible.sortedWith(
+                compareByDescending<AppEntry> { usage[it.packageName] ?: 0 }.thenBy { it.label.lowercase() }
+            )
+            else -> visible
+        }
+    }
     val favoriteApps = remember(byPackage, favorites) { favorites.mapNotNull { byPackage[it] } }
     val recentApps = remember(byPackage, recents) { recents.mapNotNull { byPackage[it] } }
+    val mostUsedApps = remember(byPackage, usage) {
+        usage.entries
+            .filter { it.value > 0 && it.key in byPackage }
+            .sortedByDescending { it.value }
+            .take(12)
+            .mapNotNull { byPackage[it.key] }
+    }
     val favoriteSet = remember(favorites) { favorites.toSet() }
+    val sections = remember(prefs.showFavorites, prefs.showRecent, prefs.showMostUsed, favoriteApps, recentApps, mostUsedApps, allApps) {
+        buildList {
+            if (prefs.showFavorites && favoriteApps.isNotEmpty()) add(Section("favorites", "Favorites", favoriteApps))
+            if (prefs.showRecent && recentApps.isNotEmpty()) add(Section("recent", "Recent", recentApps))
+            if (prefs.showMostUsed && mostUsedApps.isNotEmpty()) add(Section("most", "Most used", mostUsedApps))
+            if (allApps.isNotEmpty()) add(Section("all", "All apps", allApps))
+        }
+    }
+    val firstKey = sections.firstOrNull()?.let { "${it.id}:${it.apps.first().packageName}" }
 
     val focused = remember { mutableStateOf<AppEntry?>(null) }
-    var menuFor by remember { mutableStateOf<AppEntry?>(null) }
-    var showSettings by remember { mutableStateOf(false) }
+    var sidebar by remember { mutableStateOf<Sidebar>(Sidebar.Closed) }
+    val memory = remember { SidebarMemory(Sidebar.Settings()) }
+    if (sidebar !is Sidebar.Closed) memory.value = sidebar
+    val sidebarOpen = sidebar !is Sidebar.Closed
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val initialFocus = remember { FocusRequester() }
+    val registry = remember { FocusRegistry() }
+    val initialDone = remember { booleanArrayOf(false) }
+    val depth = animateFloatAsState(
+        targetValue = if (sidebarOpen) 1f else 0f,
+        animationSpec = spring<Float>(dampingRatio = 0.9f, stiffness = Spring.StiffnessMedium),
+        label = "depth"
+    )
 
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
@@ -139,13 +182,18 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
             delay(60_000L - value % 60_000L)
         }
     }
-    val is24 = remember { DateFormat.is24HourFormat(context) }
-    val clock = remember(now) {
+    val systemIs24 = remember { DateFormat.is24HourFormat(context) }
+    val use24 = when (prefs.timeFormat) {
+        1 -> false
+        2 -> true
+        else -> systemIs24
+    }
+    val clock = remember(now, use24) {
         val date = Date(now)
         val hour = Calendar.getInstance().apply { timeInMillis = now }.get(Calendar.HOUR_OF_DAY)
         ClockText(
-            time = SimpleDateFormat(if (is24) "HH:mm" else "h:mm", Locale.getDefault()).format(date),
-            period = if (is24) "" else SimpleDateFormat("a", Locale.getDefault()).format(date),
+            time = SimpleDateFormat(if (use24) "HH:mm" else "h:mm", Locale.getDefault()).format(date),
+            period = if (use24) "" else SimpleDateFormat("a", Locale.getDefault()).format(date),
             date = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(date),
             greeting = when {
                 hour < 5 -> "Late night"
@@ -161,281 +209,253 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
         context.launchApp(app)
     }
 
+    val actions = SidebarActions(
+        navigate = { sidebar = it },
+        close = { sidebar = Sidebar.Closed },
+        edit = { viewModel.edit(it) },
+        selectWallpaper = { viewModel.selectWallpaper(it) },
+        pickPhoto = {
+            runCatching { photoPicker.launch("image/*") }
+                .onFailure { context.toast("No photo picker on this device") }
+        },
+        toggleFavorite = { viewModel.toggleFavorite(it) },
+        open = open,
+        appInfo = { context.openAppInfo(it.packageName) },
+        uninstall = { context.uninstallApp(it.packageName) },
+        system = { context.openSystemSettings(it) },
+        reset = {
+            viewModel.resetCustomization()
+            context.toast("Customization reset")
+        }
+    )
+
     LaunchedEffect(homeSignal) {
         if (homeSignal > 0) {
-            showSettings = false
-            menuFor = null
+            sidebar = Sidebar.Closed
             listState.animateScrollToItem(0)
         }
     }
 
-    LaunchedEffect(apps.isNotEmpty()) {
-        if (isTv && apps.isNotEmpty()) {
-            repeat(10) {
-                delay(80)
-                if (runCatching { initialFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+    LaunchedEffect(firstKey) {
+        val key = firstKey ?: return@LaunchedEffect
+        if (!isTv || initialDone[0]) return@LaunchedEffect
+        repeat(12) {
+            delay(80)
+            if (registry.map[key]?.tryFocus() == true) {
+                initialDone[0] = true
+                return@LaunchedEffect
             }
         }
     }
 
-    BackHandler {
+    LaunchedEffect(sidebarOpen) {
+        if (!sidebarOpen && isTv) {
+            val key = registry.last ?: return@LaunchedEffect
+            repeat(8) {
+                delay(100)
+                if (registry.map[key]?.tryFocus() == true) return@LaunchedEffect
+            }
+        }
+    }
+
+    BackHandler(enabled = !sidebarOpen) {
         scope.launch { listState.animateScrollToItem(0) }
+    }
+    BackHandler(enabled = sidebarOpen) {
+        sidebar = when (val current = sidebar) {
+            is Sidebar.Settings -> if (current.page == SettingsPage.Root) Sidebar.Closed else Sidebar.Settings(SettingsPage.Root)
+            else -> Sidebar.Closed
+        }
     }
 
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0F0E15))
+            .background(Color(0xFF0E0F12))
     ) {
         val compact = maxWidth < 600.dp
         val pad = if (compact) 20.dp else 56.dp
-        val cardWidth = if (compact) 156.dp else maxWidth * 0.17f
+        val scale = when (prefs.cardSize) {
+            0 -> 0.86f
+            2 -> 1.18f
+            else -> 1f
+        }
+        val baseWidth = if (compact) 150.dp else maxWidth * 0.165f
+        val bannerStyle = prefs.cardStyle == 0
+        val itemWidth = if (bannerStyle) baseWidth * scale else baseWidth * 0.52f * scale
+        val sidebarWidth = if (compact) maxWidth * 0.88f else 440.dp
 
         WallpaperLayer(
-            wallpaperId = wallpaper,
+            wallpaperId = prefs.wallpaper,
             photo = photo,
-            dim = dim,
+            dim = prefs.dim,
+            accentContainer = MaterialTheme.colorScheme.primaryContainer,
             modifier = Modifier.fillMaxSize()
         )
-        FocusGlow(focused, Modifier.fillMaxSize())
 
-        Column(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
-            Header(
-                clock = clock,
-                compact = compact,
-                pad = pad,
-                focused = focused,
-                favorites = favoriteSet,
-                hint = if (isTv) "Hold OK for options" else "Long press for options",
-                onSettingsFocused = { focused.value = null },
-                onSettings = { showSettings = true }
-            )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .focusProperties { canFocus = !sidebarOpen }
+                .graphicsLayer {
+                    val s = 1f - 0.03f * depth.value
+                    scaleX = s
+                    scaleY = s
+                    transformOrigin = TransformOrigin(0f, 0.5f)
+                }
+        ) {
+            Column(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
+                Header(
+                    clock = clock,
+                    prefs = prefs,
+                    compact = compact,
+                    pad = pad,
+                    focused = focused,
+                    favorites = favoriteSet,
+                    hint = if (isTv) "Hold OK for options" else "Long press for options",
+                    iconShape = iconShape,
+                    registry = registry,
+                    onSettingsFocused = { focused.value = null },
+                    onSettings = { sidebar = Sidebar.Settings() }
+                )
 
-            if (apps.isEmpty()) {
-                Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
-                }
-            } else {
-                val firstSection = when {
-                    favoriteApps.isNotEmpty() -> "favorites"
-                    recentApps.isNotEmpty() -> "recent"
-                    else -> "all"
-                }
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentPadding = PaddingValues(bottom = 32.dp)
-                ) {
-                    if (favoriteApps.isNotEmpty()) {
-                        item(key = "favorites") {
-                            AppRow(
-                                title = "Favorites",
-                                apps = favoriteApps,
-                                cardWidth = cardWidth,
-                                pad = pad,
-                                favorites = favoriteSet,
-                                firstRequester = initialFocus.takeIf { firstSection == "favorites" },
-                                onFocused = { focused.value = it },
-                                onOpen = open,
-                                onMenu = { menuFor = it }
-                            )
-                        }
+                if (apps.isEmpty()) {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
                     }
-                    if (recentApps.isNotEmpty()) {
-                        item(key = "recent") {
-                            AppRow(
-                                title = "Recent",
-                                apps = recentApps,
-                                cardWidth = cardWidth,
-                                pad = pad,
-                                favorites = favoriteSet,
-                                firstRequester = initialFocus.takeIf { firstSection == "recent" },
-                                onFocused = { focused.value = it },
-                                onOpen = open,
-                                onMenu = { menuFor = it }
-                            )
-                        }
-                    }
-                    item(key = "all") {
-                        AppRow(
-                            title = "All apps",
-                            apps = apps,
-                            cardWidth = cardWidth,
-                            pad = pad,
-                            favorites = favoriteSet,
-                            firstRequester = initialFocus.takeIf { firstSection == "all" },
-                            onFocused = { focused.value = it },
-                            onOpen = open,
-                            onMenu = { menuFor = it }
+                } else if (sections.isEmpty()) {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = pad),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        Text(
+                            text = "No apps to show. Open Settings, then Apps to change what appears here.",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        contentPadding = PaddingValues(bottom = 32.dp)
+                    ) {
+                        items(sections, key = { it.id }) { section ->
+                            AppRow(
+                                section = section,
+                                bannerStyle = bannerStyle,
+                                showLabels = prefs.showLabels,
+                                itemWidth = itemWidth,
+                                pad = pad,
+                                favorites = favoriteSet,
+                                iconShape = iconShape,
+                                registry = registry,
+                                onFocused = { focused.value = it },
+                                onOpen = open,
+                                onMenu = { sidebar = Sidebar.Options(it) }
+                            )
+                        }
                     }
                 }
             }
         }
-    }
 
-    if (showSettings) {
-        SettingsPanel(
-            wallpaperId = wallpaper,
-            photo = photo,
-            dim = dim,
-            accentIndex = accentIndex,
-            onWallpaper = { viewModel.setWallpaper(it) },
-            onPickPhoto = {
-                runCatching { photoPicker.launch("image/*") }
-                    .onFailure { context.toast("No photo picker on this device") }
-            },
-            onDim = { viewModel.setDim(it) },
-            onAccent = { viewModel.setAccent(it) },
-            onSystem = { context.openSystemSettings(it) },
-            onDismiss = { showSettings = false }
-        )
-    }
-
-    menuFor?.let { app ->
-        val firstAction = remember { FocusRequester() }
-        LaunchedEffect(app) {
-            delay(120)
-            runCatching { firstAction.requestFocus() }
-        }
-        AlertDialog(
-            onDismissRequest = { menuFor = null },
-            icon = {
-                Image(
-                    bitmap = app.icon,
-                    contentDescription = null,
-                    modifier = Modifier.size(56.dp)
-                )
-            },
-            title = { Text(app.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
-                            menuFor = null
-                            open(app)
-                        },
-                        modifier = Modifier.fillMaxWidth().focusRequester(firstAction)
-                    ) { Text("Open") }
-                    FilledTonalButton(
-                        onClick = {
-                            viewModel.toggleFavorite(app.packageName)
-                            menuFor = null
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (app.packageName in favoriteSet) "Remove from favorites" else "Add to favorites")
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawBehind { drawRect(Color.Black.copy(alpha = 0.5f * depth.value.coerceIn(0f, 1f))) }
+                .then(
+                    if (sidebarOpen) {
+                        Modifier.pointerInput(Unit) { detectTapGestures { sidebar = Sidebar.Closed } }
+                    } else {
+                        Modifier
                     }
-                    FilledTonalButton(
-                        onClick = {
-                            menuFor = null
-                            context.openAppInfo(app.packageName)
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("App info") }
-                    if (!app.isSystem) {
-                        FilledTonalButton(
-                            onClick = {
-                                menuFor = null
-                                context.uninstallApp(app.packageName)
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.filledTonalButtonColors(
-                                containerColor = MaterialTheme.colorScheme.errorContainer,
-                                contentColor = MaterialTheme.colorScheme.onErrorContainer
-                            )
-                        ) { Text("Uninstall") }
-                    }
-                }
-            },
-            confirmButton = {}
-        )
-    }
-}
-
-@Composable
-private fun FocusGlow(focused: State<AppEntry?>, modifier: Modifier) {
-    val fallback = MaterialTheme.colorScheme.primaryContainer
-    val color = animateColorAsState(
-        targetValue = focused.value?.tint ?: fallback,
-        animationSpec = tween(500),
-        label = "glow"
-    )
-    Box(
-        modifier = modifier.drawBehind {
-            drawRect(
-                Brush.radialGradient(
-                    colors = listOf(color.value.copy(alpha = 0.34f), Color.Transparent),
-                    center = Offset(size.width * 0.14f, size.height * 0.04f),
-                    radius = size.maxDimension * 0.6f
                 )
+        )
+
+        AnimatedVisibility(
+            visible = sidebarOpen,
+            modifier = Modifier.align(Alignment.CenterEnd),
+            enter = slideInHorizontally(
+                animationSpec = spring<IntOffset>(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow)
+            ) { it } + fadeIn(tween(120)),
+            exit = slideOutHorizontally(animationSpec = tween<IntOffset>(200)) { it } + fadeOut(tween(120))
+        ) {
+            SidebarHost(
+                sidebar = memory.value,
+                prefs = prefs,
+                managerApps = managerApps,
+                favorites = favoriteSet,
+                photo = photo,
+                actions = actions,
+                modifier = Modifier.width(sidebarWidth)
             )
         }
-    )
+    }
 }
 
 @Composable
 private fun Header(
     clock: ClockText,
+    prefs: LauncherPrefs,
     compact: Boolean,
     pad: Dp,
     focused: State<AppEntry?>,
     favorites: Set<String>,
     hint: String,
+    iconShape: IconShape,
+    registry: FocusRegistry,
     onSettingsFocused: () -> Unit,
     onSettings: () -> Unit
 ) {
-    if (compact) {
-        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = pad, vertical = 8.dp)) {
-            Row(verticalAlignment = Alignment.Top) {
-                Clock(clock, 72.sp)
-                Spacer(Modifier.weight(1f))
-                SettingsButton(onSettingsFocused, onSettings)
-            }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = pad, end = pad, top = if (compact) 12.dp else 24.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            if (prefs.clockMode != 2) Clock(clock, prefs, compact)
             Spotlight(
                 focused = focused,
                 favorites = favorites,
                 hint = hint,
-                compact = true,
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                iconShape = iconShape,
+                compact = compact
             )
         }
-    } else {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = pad, vertical = 8.dp),
-            verticalAlignment = Alignment.Top
-        ) {
-            Clock(clock, 112.sp)
-            Spacer(Modifier.width(48.dp))
-            Spotlight(
-                focused = focused,
-                favorites = favorites,
-                hint = hint,
-                compact = false,
-                modifier = Modifier.weight(1f).padding(top = 30.dp)
-            )
-            SettingsButton(onSettingsFocused, onSettings)
-        }
+        SettingsButton(registry, onSettingsFocused, onSettings)
     }
 }
 
 @Composable
-private fun Clock(clock: ClockText, size: TextUnit) {
+private fun Clock(clock: ClockText, prefs: LauncherPrefs, compact: Boolean) {
+    val large = prefs.clockMode == 0
+    val size = if (large) {
+        if (compact) 52.sp else 72.sp
+    } else {
+        if (compact) 28.sp else 34.sp
+    }
     Column {
-        Text(
-            text = clock.greeting,
-            style = MaterialTheme.typography.headlineMedium,
-            color = MaterialTheme.colorScheme.tertiary
-        )
-        Row(verticalAlignment = Alignment.Bottom) {
+        if (prefs.showGreeting) {
+            Text(
+                text = clock.greeting,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             Text(
                 text = clock.time,
                 style = MaterialTheme.typography.displayLarge.copy(
                     fontSize = size,
-                    lineHeight = size * 0.95f,
+                    lineHeight = size * 1.05f,
                     fontFeatureSettings = "tnum"
                 ),
                 color = MaterialTheme.colorScheme.onBackground,
@@ -444,37 +464,64 @@ private fun Clock(clock: ClockText, size: TextUnit) {
             if (clock.period.isNotEmpty()) {
                 Text(
                     text = clock.period,
-                    style = MaterialTheme.typography.headlineMedium,
+                    style = MaterialTheme.typography.titleLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 10.dp, bottom = 12.dp)
+                    modifier = Modifier.padding(bottom = if (large) 12.dp else 4.dp)
+                )
+            }
+            if (!large && prefs.showDate) {
+                Text(
+                    text = clock.date,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 6.dp, bottom = 6.dp)
                 )
             }
         }
-        Text(
-            text = clock.date,
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        if (large && prefs.showDate) {
+            Text(
+                text = clock.date,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
 @Composable
-private fun SettingsButton(onFocused: () -> Unit, onClick: () -> Unit) {
-    val shapeAt = remember { cookieMorph(8, 0.07f, 0.12f, 1.4f) }
+private fun SettingsButton(
+    registry: FocusRegistry,
+    onFocused: () -> Unit,
+    onClick: () -> Unit
+) {
+    val requester = remember { FocusRequester() }
+    DisposableEffect(Unit) {
+        registry.map["settings"] = requester
+        onDispose { registry.map.remove("settings") }
+    }
+    val shapeAt = remember { cookieMorph(8, 0f, 0.1f, 1.4f) }
     FocusSurface(
-        modifier = Modifier.size(64.dp),
+        modifier = Modifier.size(56.dp),
         shapeAt = shapeAt,
-        containerColor = MaterialTheme.colorScheme.primaryContainer,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        focusedContainerColor = MaterialTheme.colorScheme.primaryContainer,
         ringColor = MaterialTheme.colorScheme.primary,
-        focusedScale = 1.16f,
-        onFocusChange = { if (it) onFocused() },
+        ringWidth = 2.dp,
+        focusedScale = 1.14f,
+        focusRequester = requester,
+        onFocusChange = {
+            if (it) {
+                registry.last = "settings"
+                onFocused()
+            }
+        },
         onClick = onClick
     ) {
         Icon(
             imageVector = Icons.Rounded.Settings,
             contentDescription = "Settings",
-            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-            modifier = Modifier.align(Alignment.Center).size(30.dp)
+            tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.align(Alignment.Center).size(26.dp)
         )
     }
 }
@@ -484,87 +531,49 @@ private fun Spotlight(
     focused: State<AppEntry?>,
     favorites: Set<String>,
     hint: String,
-    compact: Boolean,
-    modifier: Modifier
+    iconShape: IconShape,
+    compact: Boolean
 ) {
     val app = focused.value
-    val spatial = spring<IntOffset>(dampingRatio = 0.75f, stiffness = Spring.StiffnessMediumLow)
-    val iconSize = if (compact) 64.dp else 92.dp
-    val nameSize = if (compact) 30.sp else 46.sp
-    val base = MaterialTheme.colorScheme.surfaceContainerHigh
-
     Box(
-        modifier = modifier.height(if (compact) 84.dp else 118.dp),
+        modifier = Modifier.fillMaxWidth().height(if (compact) 64.dp else 80.dp),
         contentAlignment = Alignment.CenterStart
     ) {
-        AnimatedContent(
-            targetState = app,
-            transitionSpec = {
-                (fadeIn(tween(220)) + slideInVertically(spatial) { it / 3 }) togetherWith fadeOut(tween(120))
-            },
-            label = "spotlight"
-        ) { target ->
+        Crossfade(targetState = app, animationSpec = tween(180), label = "spotlight") { target ->
             if (target == null) {
                 Text(
-                    text = "Pick something to start",
-                    style = MaterialTheme.typography.headlineLarge,
+                    text = "Select an app",
+                    style = MaterialTheme.typography.titleLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
+                val meta = listOfNotNull(
+                    if (target.isTv) "Made for TV" else null,
+                    if (target.packageName in favorites) "Favorite" else null
+                ).joinToString(" · ").ifEmpty { hint }
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(20.dp)
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(iconSize)
-                            .clip(CookieShape(9, 0.07f))
-                            .background(lerp(base, target.tint, 0.55f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Image(
-                            bitmap = target.icon,
-                            contentDescription = null,
-                            modifier = Modifier.fillMaxSize(0.62f)
-                        )
-                    }
+                    Image(
+                        bitmap = target.icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(if (compact) 44.dp else 56.dp).clip(iconShape.still)
+                    )
                     Column {
                         Text(
                             text = target.label,
-                            style = MaterialTheme.typography.displayMedium.copy(
-                                fontSize = nameSize,
-                                lineHeight = nameSize * 1.05f
-                            ),
+                            style = if (compact) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.headlineLarge,
                             color = MaterialTheme.colorScheme.onBackground,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Row(
-                            modifier = Modifier.padding(top = 6.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Chip(
-                                text = if (target.isTv) "Made for TV" else "Phone app",
-                                container = MaterialTheme.colorScheme.secondaryContainer,
-                                content = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                            if (target.packageName in favorites) {
-                                Chip(
-                                    text = "Favorite",
-                                    container = MaterialTheme.colorScheme.tertiaryContainer,
-                                    content = MaterialTheme.colorScheme.onTertiaryContainer
-                                )
-                            }
-                            if (!compact) {
-                                Text(
-                                    text = hint,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(start = 6.dp)
-                                )
-                            }
-                        }
+                        Text(
+                            text = meta,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
                     }
                 }
             }
@@ -573,56 +582,40 @@ private fun Spotlight(
 }
 
 @Composable
-private fun Chip(text: String, container: Color, content: Color) {
-    Box(
-        modifier = Modifier
-            .clip(CircleShape)
-            .background(container)
-            .padding(horizontal = 14.dp, vertical = 5.dp)
-    ) {
-        Text(text = text, style = MaterialTheme.typography.labelLarge, color = content)
-    }
-}
-
-@Composable
 private fun AppRow(
-    title: String,
-    apps: List<AppEntry>,
-    cardWidth: Dp,
+    section: Section,
+    bannerStyle: Boolean,
+    showLabels: Boolean,
+    itemWidth: Dp,
     pad: Dp,
     favorites: Set<String>,
-    firstRequester: FocusRequester?,
+    iconShape: IconShape,
+    registry: FocusRegistry,
     onFocused: (AppEntry) -> Unit,
     onOpen: (AppEntry) -> Unit,
     onMenu: (AppEntry) -> Unit
 ) {
     Column {
-        Row(
-            modifier = Modifier.padding(start = pad, top = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.onBackground
-            )
-            Chip(
-                text = apps.size.toString(),
-                container = MaterialTheme.colorScheme.tertiaryContainer,
-                content = MaterialTheme.colorScheme.onTertiaryContainer
-            )
-        }
+        Text(
+            text = section.title,
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = pad, top = 8.dp)
+        )
         LazyRow(
-            contentPadding = PaddingValues(horizontal = pad, vertical = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(20.dp)
+            contentPadding = PaddingValues(horizontal = pad, vertical = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(if (bannerStyle) 16.dp else 22.dp)
         ) {
-            itemsIndexed(apps, key = { _, app -> app.packageName }) { index, app ->
-                AppCard(
+            items(section.apps, key = { it.packageName }) { app ->
+                AppItem(
                     app = app,
-                    width = cardWidth,
+                    keyId = "${section.id}:${app.packageName}",
+                    banner = bannerStyle,
+                    width = itemWidth,
+                    showLabel = showLabels,
                     isFavorite = app.packageName in favorites,
-                    focusRequester = if (index == 0) firstRequester else null,
+                    iconShape = iconShape,
+                    registry = registry,
                     onFocused = { onFocused(app) },
                     onClick = { onOpen(app) },
                     onLongClick = { onMenu(app) }
@@ -633,86 +626,118 @@ private fun AppRow(
 }
 
 @Composable
-private fun AppCard(
+private fun AppItem(
     app: AppEntry,
+    keyId: String,
+    banner: Boolean,
     width: Dp,
+    showLabel: Boolean,
     isFavorite: Boolean,
-    focusRequester: FocusRequester?,
+    iconShape: IconShape,
+    registry: FocusRegistry,
     onFocused: () -> Unit,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
+    val requester = remember { FocusRequester() }
+    DisposableEffect(keyId) {
+        registry.map[keyId] = requester
+        onDispose { if (registry.map[keyId] === requester) registry.map.remove(keyId) }
+    }
     var focused by remember { mutableStateOf(false) }
     val labelAlpha = animateFloatAsState(
-        targetValue = if (focused) 1f else 0.62f,
+        targetValue = if (focused) 1f else 0.7f,
         animationSpec = tween(160),
         label = "label"
     )
-    val shapeAt = remember { roundedMorph(24.dp, 38.dp) }
     val base = MaterialTheme.colorScheme.surfaceContainerHigh
-    val container = remember(app.tint, base) { lerp(base, app.tint, 0.5f) }
-    val banner = app.banner
-    val letter = remember(app.label) { app.label.firstOrNull()?.uppercase() ?: "" }
-    val letterSize = (width.value * 0.95f).sp
+    val high = MaterialTheme.colorScheme.surfaceContainerHighest
+    val onFocusChange: (Boolean) -> Unit = { has ->
+        focused = has
+        if (has) {
+            registry.last = keyId
+            onFocused()
+        }
+    }
 
-    Column(modifier = Modifier.width(width)) {
-        FocusSurface(
-            modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-            shapeAt = shapeAt,
-            containerColor = container,
-            ringColor = MaterialTheme.colorScheme.primary,
-            focusRequester = focusRequester,
-            onFocusChange = {
-                focused = it
-                if (it) onFocused()
-            },
-            onLongClick = onLongClick,
-            onClick = onClick
-        ) {
-            if (banner != null) {
-                Image(
-                    bitmap = banner,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                Text(
-                    text = letter,
-                    style = MaterialTheme.typography.displayLarge.copy(fontSize = letterSize, lineHeight = letterSize),
-                    color = Color.White.copy(alpha = 0.12f),
-                    maxLines = 1,
-                    modifier = Modifier.align(Alignment.BottomEnd).offset(x = 12.dp, y = 28.dp)
-                )
+    Column(
+        modifier = Modifier.width(width),
+        horizontalAlignment = if (banner) Alignment.Start else Alignment.CenterHorizontally
+    ) {
+        if (banner) {
+            val shapeAt = remember { roundedMorph(20.dp, 32.dp) }
+            val bannerImage = app.banner
+            FocusSurface(
+                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                shapeAt = shapeAt,
+                containerColor = lerp(base, app.tint, 0.18f),
+                focusedContainerColor = lerp(high, app.tint, 0.3f),
+                ringColor = MaterialTheme.colorScheme.primary,
+                focusRequester = requester,
+                onFocusChange = onFocusChange,
+                onLongClick = onLongClick,
+                onClick = onClick
+            ) {
+                if (bannerImage != null) {
+                    Image(
+                        bitmap = bannerImage,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Image(
+                        bitmap = app.icon,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .fillMaxHeight(0.52f)
+                            .aspectRatio(1f)
+                            .clip(iconShape.still)
+                    )
+                }
+                if (isFavorite) {
+                    Icon(
+                        imageVector = Icons.Rounded.Star,
+                        contentDescription = "Favorite",
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).size(16.dp)
+                    )
+                }
+            }
+        } else {
+            FocusSurface(
+                modifier = Modifier.size(width),
+                shapeAt = iconShape.shapeAt,
+                containerColor = base,
+                ringColor = MaterialTheme.colorScheme.primary,
+                focusedScale = 1.1f,
+                focusRequester = requester,
+                onFocusChange = onFocusChange,
+                onLongClick = onLongClick,
+                onClick = onClick
+            ) {
                 Image(
                     bitmap = app.icon,
                     contentDescription = null,
-                    modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .padding(start = 18.dp)
-                        .fillMaxHeight(0.54f)
-                        .aspectRatio(1f)
-                )
-            }
-            if (isFavorite) {
-                Icon(
-                    imageVector = Icons.Rounded.Star,
-                    contentDescription = "Favorite",
-                    tint = MaterialTheme.colorScheme.tertiary,
-                    modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).size(20.dp)
+                    modifier = Modifier.fillMaxSize()
                 )
             }
         }
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = app.label,
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier
-                .padding(horizontal = 8.dp)
-                .graphicsLayer { alpha = labelAlpha.value }
-        )
+        if (showLabel) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = app.label,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = if (banner) TextAlign.Start else TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp)
+                    .graphicsLayer { alpha = labelAlpha.value }
+            )
+        }
     }
 }

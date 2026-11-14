@@ -1,5 +1,6 @@
 package dev.expressive.launcher.ui
 
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Outline
@@ -45,9 +46,24 @@ fun roundedMorph(idle: Dp, focused: Dp): ShapeAt = { progress, density ->
     }
 }
 
+fun percentMorph(idle: Int, focused: Int): ShapeAt = { progress, _ ->
+    val percent = lerp(idle.toFloat(), focused.toFloat(), progress.coerceIn(0f, 1f)).toInt().coerceIn(0, 50)
+    RoundedCornerShape(percent)
+}
+
 fun cookieMorph(sides: Int, idleAmplitude: Float, focusedAmplitude: Float, turn: Float): ShapeAt = { progress, _ ->
     CookieShape(sides, lerp(idleAmplitude, focusedAmplitude, progress), turn * progress)
 }
+
+class IconShape(val name: String, val shapeAt: ShapeAt, val still: Shape)
+
+val IconShapes = listOf(
+    IconShape("Squircle", percentMorph(28, 40), RoundedCornerShape(28)),
+    IconShape("Circle", cookieMorph(12, 0f, 0.05f, 0.6f), CircleShape),
+    IconShape("Cookie", cookieMorph(9, 0.07f, 0.11f, 1.1f), CookieShape(9, 0.07f)),
+    IconShape("Flower", cookieMorph(6, 0.1f, 0.15f, 1.0f), CookieShape(6, 0.1f)),
+    IconShape("Square", percentMorph(10, 26), RoundedCornerShape(10))
+)
 
 fun Outline.toPath(): Path = when (this) {
     is Outline.Generic -> path

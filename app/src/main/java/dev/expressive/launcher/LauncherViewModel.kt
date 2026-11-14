@@ -6,9 +6,12 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
+import android.graphics.AdaptiveIconDrawable
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Matrix
+import android.graphics.drawable.Drawable
 import android.media.ExifInterface
 import android.net.Uri
 import androidx.compose.ui.graphics.Color
@@ -42,17 +45,14 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private val _recents = MutableStateFlow(readList("recents"))
     val recents: StateFlow<List<String>> = _recents.asStateFlow()
 
+    private val _usage = MutableStateFlow(readUsage())
+    val usage: StateFlow<Map<String, Int>> = _usage.asStateFlow()
+
     private val _homeSignal = MutableStateFlow(0)
     val homeSignal: StateFlow<Int> = _homeSignal.asStateFlow()
 
-    private val _wallpaper = MutableStateFlow(prefs.getString("wallpaper", "aurora").orEmpty())
-    val wallpaper: StateFlow<String> = _wallpaper.asStateFlow()
-
-    private val _dim = MutableStateFlow(prefs.getInt("dim", 1))
-    val dim: StateFlow<Int> = _dim.asStateFlow()
-
-    private val _accent = MutableStateFlow(prefs.getInt("accent", 0))
-    val accent: StateFlow<Int> = _accent.asStateFlow()
+    private val _settings = MutableStateFlow(loadPrefs())
+    val settings: StateFlow<LauncherPrefs> = _settings.asStateFlow()
 
     private val _photo = MutableStateFlow<ImageBitmap?>(null)
     val photo: StateFlow<ImageBitmap?> = _photo.asStateFlow()
@@ -60,7 +60,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private var loadJob: Job? = null
 
     init {
-        if (_wallpaper.value == "photo") loadPhoto()
+        if (_settings.value.wallpaper == "photo") loadPhoto()
     }
 
     fun refresh() {
@@ -74,6 +74,21 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         _homeSignal.update { it + 1 }
     }
 
+    fun edit(transform: (LauncherPrefs) -> LauncherPrefs) {
+        val next = transform(_settings.value)
+        _settings.value = next
+        savePrefs(next)
+    }
+
+    fun selectWallpaper(id: String) {
+        edit { it.copy(wallpaper = id) }
+        if (id == "photo" && _photo.value == null) loadPhoto()
+    }
+
+    fun resetCustomization() {
+        edit { LauncherPrefs() }
+    }
+
     fun toggleFavorite(packageName: String) {
         val current = _favorites.value
         val next = if (packageName in current) current - packageName else current + packageName
@@ -82,25 +97,13 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun markLaunched(packageName: String) {
-        val next = (listOf(packageName) + _recents.value.filter { it != packageName }).take(12)
-        _recents.value = next
-        writeList("recents", next)
-    }
-
-    fun setWallpaper(id: String) {
-        _wallpaper.value = id
-        prefs.edit().putString("wallpaper", id).apply()
-        if (id == "photo" && _photo.value == null) loadPhoto()
-    }
-
-    fun setDim(level: Int) {
-        _dim.value = level
-        prefs.edit().putInt("dim", level).apply()
-    }
-
-    fun setAccent(index: Int) {
-        _accent.value = index
-        prefs.edit().putInt("accent", index).apply()
+        val recents = (listOf(packageName) + _recents.value.filter { it != packageName }).take(12)
+        _recents.value = recents
+        writeList("recents", recents)
+        val counts = _usage.value.toMutableMap()
+        counts[packageName] = (counts[packageName] ?: 0) + 1
+        _usage.value = counts
+        prefs.edit().putString("usage", counts.entries.joinToString(",") { "${it.key}=${it.value}" }).apply()
     }
 
     fun importPhoto(uri: Uri, onResult: (Boolean) -> Unit) {
@@ -108,11 +111,62 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             val stored = withContext(Dispatchers.IO) { runCatching { storePhoto(uri) }.getOrDefault(false) }
             if (stored) {
                 _photo.value = withContext(Dispatchers.IO) { decodePhoto() }
-                setWallpaper("photo")
+                selectWallpaper("photo")
             }
             onResult(stored)
         }
     }
+
+    private fun loadPrefs(): LauncherPrefs = LauncherPrefs(
+        wallpaper = prefs.getString("wallpaper", "ink").orEmpty().ifEmpty { "ink" },
+        dim = prefs.getInt("dim", 1),
+        accent = prefs.getInt("accent", 0),
+        iconShape = prefs.getInt("iconShape", 0),
+        calmMotion = prefs.getBoolean("calm", false),
+        clockMode = prefs.getInt("clockMode", 0),
+        timeFormat = prefs.getInt("timeFormat", 0),
+        showDate = prefs.getBoolean("showDate", true),
+        showGreeting = prefs.getBoolean("showGreeting", false),
+        cardStyle = prefs.getInt("cardStyle", 0),
+        cardSize = prefs.getInt("cardSize", 1),
+        showLabels = prefs.getBoolean("showLabels", true),
+        showFavorites = prefs.getBoolean("showFavorites", true),
+        showRecent = prefs.getBoolean("showRecent", true),
+        showMostUsed = prefs.getBoolean("showMostUsed", false),
+        sort = prefs.getInt("sort", 0),
+        showSystem = prefs.getBoolean("showSystem", false),
+        hidden = readList("hidden").toSet()
+    )
+
+    private fun savePrefs(p: LauncherPrefs) {
+        prefs.edit()
+            .putString("wallpaper", p.wallpaper)
+            .putInt("dim", p.dim)
+            .putInt("accent", p.accent)
+            .putInt("iconShape", p.iconShape)
+            .putBoolean("calm", p.calmMotion)
+            .putInt("clockMode", p.clockMode)
+            .putInt("timeFormat", p.timeFormat)
+            .putBoolean("showDate", p.showDate)
+            .putBoolean("showGreeting", p.showGreeting)
+            .putInt("cardStyle", p.cardStyle)
+            .putInt("cardSize", p.cardSize)
+            .putBoolean("showLabels", p.showLabels)
+            .putBoolean("showFavorites", p.showFavorites)
+            .putBoolean("showRecent", p.showRecent)
+            .putBoolean("showMostUsed", p.showMostUsed)
+            .putInt("sort", p.sort)
+            .putBoolean("showSystem", p.showSystem)
+            .putString("hidden", p.hidden.joinToString(","))
+            .apply()
+    }
+
+    private fun readUsage(): Map<String, Int> =
+        prefs.getString("usage", "").orEmpty().split(",").mapNotNull { entry ->
+            val parts = entry.split("=")
+            val count = parts.getOrNull(1)?.toIntOrNull()
+            if (parts.size == 2 && count != null && parts[0].isNotBlank()) parts[0] to count else null
+        }.toMap()
 
     private fun photoFile(): File = File(getApplication<Application>().filesDir, "wallpaper.jpg")
 
@@ -172,16 +226,41 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private fun resolve(pm: PackageManager, category: String): List<ResolveInfo> =
         pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(category), 0)
 
+    private fun renderIcon(drawable: Drawable): Bitmap {
+        val size = 160
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        if (drawable is AdaptiveIconDrawable) {
+            val layer = (size * 108f / 72f).toInt()
+            val offset = -(layer - size) / 2
+            drawable.background?.let {
+                it.setBounds(offset, offset, offset + layer, offset + layer)
+                it.draw(canvas)
+            }
+            drawable.foreground?.let {
+                it.setBounds(offset, offset, offset + layer, offset + layer)
+                it.draw(canvas)
+            }
+        } else {
+            canvas.drawColor(0xFF2B2E35.toInt())
+            val inset = (size * 0.16f).toInt()
+            drawable.setBounds(inset, inset, size - inset, size - inset)
+            drawable.draw(canvas)
+        }
+        return bitmap
+    }
+
     private fun tintOf(bitmap: Bitmap): Color {
         val pixel = Bitmap.createScaledBitmap(bitmap, 1, 1, true).getPixel(0, 0)
-        if (AndroidColor.alpha(pixel) < 40) return Color(0xFF6B4EFF)
+        if (AndroidColor.alpha(pixel) < 40) return Color(0xFF6B7280)
         val hsv = FloatArray(3)
         AndroidColor.colorToHSV(pixel, hsv)
-        hsv[1] = (hsv[1] * 1.35f).coerceAtMost(1f)
-        hsv[2] = hsv[2].coerceIn(0.5f, 0.92f)
+        hsv[1] = (hsv[1] * 1.2f).coerceAtMost(1f)
+        hsv[2] = hsv[2].coerceIn(0.45f, 0.9f)
         return Color(AndroidColor.HSVToColor(hsv))
     }
 
+    @Suppress("DEPRECATION")
     private fun queryApps(): List<AppEntry> {
         val context = getApplication<Application>()
         val pm = context.packageManager
@@ -198,7 +277,8 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             .mapNotNull { (info, isTv) ->
                 runCatching {
                     val activity = info.activityInfo
-                    val iconBitmap = info.loadIcon(pm).toBitmap(128, 128)
+                    val flags = activity.applicationInfo.flags
+                    val iconBitmap = renderIcon(info.loadIcon(pm))
                     AppEntry(
                         packageName = activity.packageName,
                         activityName = activity.name,
@@ -211,7 +291,10 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                         },
                         tint = tintOf(iconBitmap),
                         isTv = isTv,
-                        isSystem = (activity.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                        isSystem = (flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
+                            (flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0,
+                        installedAt = runCatching { pm.getPackageInfo(activity.packageName, 0).firstInstallTime }
+                            .getOrDefault(0L)
                     )
                 }.getOrNull()
             }
