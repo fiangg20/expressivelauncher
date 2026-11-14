@@ -63,6 +63,12 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private val _names = MutableStateFlow(readNames())
     val names: StateFlow<Map<String, String>> = _names.asStateFlow()
 
+    private val _categories = MutableStateFlow(readCategories())
+    val categories: StateFlow<Map<String, Int>> = _categories.asStateFlow()
+
+    private val _quickSignal = MutableStateFlow(0)
+    val quickSignal: StateFlow<Int> = _quickSignal.asStateFlow()
+
     private val _ambient = MutableStateFlow(false)
     val ambient: StateFlow<Boolean> = _ambient.asStateFlow()
 
@@ -87,6 +93,17 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                 if (minutes > 0 && foreground && !_ambient.value && idle > minutes * 60_000L) startAmbient()
             }
         }
+    }
+
+    fun toggleQuick() {
+        _quickSignal.update { it + 1 }
+    }
+
+    fun setCategory(packageName: String, id: Int?) {
+        val next = _categories.value.toMutableMap()
+        if (id == null) next.remove(packageName) else next[packageName] = id
+        _categories.value = next
+        prefs.edit().putString("categories", JSONObject(next).toString()).apply()
     }
 
     fun touch() {
@@ -249,6 +266,11 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         json.keys().asSequence().associateWith { json.getString(it) }
     }.getOrDefault(emptyMap())
 
+    private fun readCategories(): Map<String, Int> = runCatching {
+        val json = JSONObject(prefs.getString("categories", "{}").orEmpty())
+        json.keys().asSequence().associateWith { json.getInt(it) }
+    }.getOrDefault(emptyMap())
+
     private fun photoFile(): File = File(getApplication<Application>().filesDir, "wallpaper.jpg")
 
     private fun loadPhoto() {
@@ -361,6 +383,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                     val flags = activity.applicationInfo.flags
                     val iconBitmap = renderIcon(info.loadIcon(pm))
                     val appLabel = info.loadLabel(pm).toString()
+                    val autoCategory = AppCategories.auto(activity.applicationInfo.category, appLabel, activity.packageName)
                     AppEntry(
                         packageName = activity.packageName,
                         activityName = activity.name,
@@ -373,7 +396,8 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                             null
                         },
                         tint = tintOf(iconBitmap),
-                        category = activity.applicationInfo.category,
+                        category = autoCategory,
+                        autoCategory = autoCategory,
                         isTv = isTv,
                         isSystem = (flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
                             (flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0,

@@ -14,6 +14,7 @@ data class AppEntry(
     val banner: ImageBitmap?,
     val tint: Color,
     val category: Int,
+    val autoCategory: Int,
     val isTv: Boolean,
     val isSystem: Boolean,
     val installedAt: Long

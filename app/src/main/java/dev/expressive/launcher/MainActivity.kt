@@ -78,6 +78,10 @@ class MainActivity : ComponentActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (viewModel.wakeIfAmbient()) return true
         viewModel.touch()
+        if (event.keyCode == KeyEvent.KEYCODE_MENU || event.keyCode == KeyEvent.KEYCODE_SETTINGS) {
+            if (event.action == KeyEvent.ACTION_UP) viewModel.toggleQuick()
+            return true
+        }
         return super.dispatchKeyEvent(event)
     }
 

@@ -118,7 +118,7 @@ fun FocusSurface(
             }
             .onKeyEvent { event ->
                 if (onLongClick != null && event.type == KeyEventType.KeyUp &&
-                    (event.key == Key.Menu || event.key == Key.Info)
+                    event.key == Key.Info
                 ) {
                     onLongClick()
                     true

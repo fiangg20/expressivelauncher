@@ -82,6 +82,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.expressive.launcher.AppCategories
 import dev.expressive.launcher.AppEntry
 import dev.expressive.launcher.LauncherPrefs
 import dev.expressive.launcher.LauncherViewModel
@@ -116,24 +117,10 @@ private data class ClockText(
     val greeting: String
 )
 
-private val CategoryOrder = listOf(2, 0, 1, 3, 4, 5, 6, 7, -1)
-
-private fun categoryTitle(category: Int): String = when (category) {
-    0 -> "Games"
-    1 -> "Music"
-    2 -> "Video"
-    3 -> "Photos"
-    4 -> "Social"
-    5 -> "News"
-    6 -> "Maps"
-    7 -> "Productivity"
-    else -> "Other"
-}
-
 private fun categorySections(apps: List<AppEntry>): List<Section> {
-    val grouped = apps.groupBy { if (it.category in 0..7) it.category else -1 }
-    return CategoryOrder.mapNotNull { category ->
-        grouped[category]?.takeIf { it.isNotEmpty() }?.let { Section("cat:$category", categoryTitle(category), it) }
+    val grouped = apps.groupBy { app -> if (AppCategories.all.any { it.id == app.category }) app.category else -1 }
+    return AppCategories.all.mapNotNull { category ->
+        grouped[category.id]?.takeIf { it.isNotEmpty() }?.let { Section("cat:${category.id}", category.name, it) }
     }
 }
 
@@ -145,6 +132,8 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     val recents by viewModel.recents.collectAsStateWithLifecycle()
     val usage by viewModel.usage.collectAsStateWithLifecycle()
     val names by viewModel.names.collectAsStateWithLifecycle()
+    val customCategories by viewModel.categories.collectAsStateWithLifecycle()
+    val quickSignal by viewModel.quickSignal.collectAsStateWithLifecycle()
     val ambient by viewModel.ambient.collectAsStateWithLifecycle()
     val homeSignal by viewModel.homeSignal.collectAsStateWithLifecycle()
     val prefs by viewModel.settings.collectAsStateWithLifecycle()
@@ -154,13 +143,17 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     val isTv = remember { context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) }
     val iconShape = IconShapes.getOrElse(prefs.iconShape) { IconShapes.first() }
 
-    val named = remember(apps, names) {
-        if (names.isEmpty()) {
+    val named = remember(apps, names, customCategories) {
+        if (names.isEmpty() && customCategories.isEmpty()) {
             apps
         } else {
             apps.map { app ->
-                val custom = names[app.packageName]
-                if (custom.isNullOrBlank()) app else app.copy(label = custom)
+                val customName = names[app.packageName]
+                val customCategory = customCategories[app.packageName]
+                app.copy(
+                    label = if (customName.isNullOrBlank()) app.label else customName,
+                    category = customCategory ?: app.autoCategory
+                )
             }
         }
     }
@@ -283,8 +276,20 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
         ambientNow = {
             sidebar = Sidebar.Closed
             viewModel.startAmbient()
-        }
+        },
+        setCategory = { packageName, id -> viewModel.setCategory(packageName, id) }
     )
+
+    LaunchedEffect(quickSignal) {
+        if (quickSignal > 0) {
+            val current = sidebar
+            sidebar = if (current is Sidebar.Settings && current.page == SettingsPage.Quick) {
+                Sidebar.Closed
+            } else {
+                Sidebar.Settings(SettingsPage.Quick)
+            }
+        }
+    }
 
     LaunchedEffect(homeSignal) {
         if (homeSignal > 0) {
@@ -690,6 +695,7 @@ private fun Spotlight(
                 )
             } else {
                 val meta = listOfNotNull(
+                    if (target.category != -1) AppCategories.name(target.category) else null,
                     if (target.isTv) "Made for TV" else null,
                     if (target.packageName in favorites) "Favorite" else null
                 ).joinToString(" · ").ifEmpty { hint }

@@ -97,6 +97,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import kotlin.math.roundToInt
+import dev.expressive.launcher.AppCategories
 import dev.expressive.launcher.AppEntry
 import dev.expressive.launcher.LauncherPrefs
 import kotlinx.coroutines.delay
@@ -117,6 +118,7 @@ sealed interface Sidebar {
     data class Options(val app: AppEntry) : Sidebar
     data object Search : Sidebar
     data class Rename(val app: AppEntry) : Sidebar
+    data class Categorize(val app: AppEntry) : Sidebar
 }
 
 class SidebarActions(
@@ -134,12 +136,14 @@ class SidebarActions(
     val rename: (String, String) -> Unit,
     val moveFavorite: (String, Int) -> Unit,
     val assistant: () -> Unit,
-    val ambientNow: () -> Unit
+    val ambientNow: () -> Unit,
+    val setCategory: (String, Int?) -> Unit
 )
 
 fun Sidebar.parent(): Sidebar = when (this) {
     is Sidebar.Settings -> if (page == SettingsPage.Root) Sidebar.Closed else Sidebar.Settings(SettingsPage.Root)
     is Sidebar.Rename -> Sidebar.Options(app)
+    is Sidebar.Categorize -> Sidebar.Options(app)
     else -> Sidebar.Closed
 }
 
@@ -174,6 +178,7 @@ fun SidebarHost(
                 is Sidebar.Options -> OptionsPage(state.app, prefs, favorites, favoriteOrder, usage, actions)
                 Sidebar.Search -> SearchPage(managerApps, recents, prefs, actions)
                 is Sidebar.Rename -> RenamePage(state.app, actions)
+                is Sidebar.Categorize -> CategoryPage(state.app, actions)
                 Sidebar.Closed -> Spacer(Modifier.fillMaxSize())
             }
         }
@@ -600,6 +605,12 @@ private fun OptionsPage(
             subtitle = if (app.label != app.systemLabel) "Originally ${app.systemLabel}" else null,
             icon = Icons.Rounded.Edit,
             onClick = { actions.navigate(Sidebar.Rename(app)) }
+        )
+        SideItem(
+            title = "Category",
+            subtitle = AppCategories.name(app.category) + if (app.category != app.autoCategory) " (custom)" else " (automatic)",
+            icon = Icons.Rounded.Apps,
+            onClick = { actions.navigate(Sidebar.Categorize(app)) }
         )
         SideItem(
             title = "Hide from home screen",
@@ -1044,7 +1055,7 @@ private fun SearchPage(
         if (q.isEmpty()) {
             recents.take(8)
         } else {
-            apps.filter { it.label.lowercase().contains(q) }
+            apps.filter { it.label.lowercase().contains(q) || AppCategories.name(it.category).lowercase().contains(q) }
                 .sortedWith(
                     compareByDescending<AppEntry> { it.label.lowercase().startsWith(q) }
                         .thenBy { it.label.lowercase() }
@@ -1155,5 +1166,58 @@ private fun RenamePage(app: AppEntry, actions: SidebarActions) {
                 actions.close()
             }
         )
+    }
+}
+
+@Composable
+private fun CheckMark() {
+    Icon(
+        imageVector = Icons.Rounded.Check,
+        contentDescription = "Selected",
+        tint = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.size(24.dp)
+    )
+}
+
+@Composable
+private fun CategoryPage(app: AppEntry, actions: SidebarActions) {
+    val first = rememberFirstFocus("category:" + app.packageName)
+    val custom = app.category != app.autoCategory
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        PageHeader("Category") { actions.navigate(Sidebar.Options(app)) }
+        SideItem(
+            title = "Automatic",
+            subtitle = AppCategories.name(app.autoCategory),
+            requester = first,
+            trailing = if (!custom) {
+                { CheckMark() }
+            } else {
+                null
+            },
+            onClick = {
+                actions.setCategory(app.packageName, null)
+                actions.close()
+            }
+        )
+        AppCategories.all.forEach { category ->
+            SideItem(
+                title = category.name,
+                trailing = if (custom && category.id == app.category) {
+                    { CheckMark() }
+                } else {
+                    null
+                },
+                onClick = {
+                    actions.setCategory(app.packageName, if (category.id == app.autoCategory) null else category.id)
+                    actions.close()
+                }
+            )
+        }
     }
 }
