@@ -1,5 +1,6 @@
 package dev.expressive.launcher.ui
 
+import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -12,6 +13,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 
@@ -88,4 +90,14 @@ fun WallpaperLayer(
             )
         )
     }
+}
+
+fun wallpaperSeed(id: String, photo: ImageBitmap?, fallback: Color): Color {
+    if (id == "photo" && photo != null) {
+        return runCatching {
+            val pixel = Bitmap.createScaledBitmap(photo.asAndroidBitmap(), 1, 1, true).getPixel(0, 0)
+            Color(pixel)
+        }.getOrDefault(fallback)
+    }
+    return WallpaperPresets.firstOrNull { it.id == id }?.to ?: fallback
 }

@@ -9,9 +9,11 @@ data class AppEntry(
     val packageName: String,
     val activityName: String,
     val label: String,
+    val systemLabel: String,
     val icon: ImageBitmap,
     val banner: ImageBitmap?,
     val tint: Color,
+    val category: Int,
     val isTv: Boolean,
     val isSystem: Boolean,
     val installedAt: Long

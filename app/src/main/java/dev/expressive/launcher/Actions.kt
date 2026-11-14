@@ -57,3 +57,18 @@ fun Context.uninstallApp(packageName: String) {
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     runCatching { startActivity(intent) }
 }
+
+fun Context.launchAssistant() {
+    val candidates = listOf(
+        Intent(Intent.ACTION_ASSIST),
+        Intent(Intent.ACTION_VOICE_COMMAND),
+        Intent(Intent.ACTION_WEB_SEARCH)
+    )
+    for (candidate in candidates) {
+        val started = runCatching {
+            startActivity(candidate.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.isSuccess
+        if (started) return
+    }
+    toast("No assistant found on this device")
+}

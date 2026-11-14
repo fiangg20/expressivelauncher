@@ -75,12 +75,35 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
+import android.content.Context
+import android.media.AudioManager
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.rounded.ChevronLeft
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.Slider
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
+import kotlin.math.roundToInt
 import dev.expressive.launcher.AppEntry
 import dev.expressive.launcher.LauncherPrefs
 import kotlinx.coroutines.delay
 
 enum class SettingsPage(val title: String) {
     Root("Settings"),
+    Quick("Quick settings"),
     Wallpaper("Wallpaper"),
     Appearance("Appearance"),
     Home("Home screen"),
@@ -92,6 +115,8 @@ sealed interface Sidebar {
     data object Closed : Sidebar
     data class Settings(val page: SettingsPage = SettingsPage.Root) : Sidebar
     data class Options(val app: AppEntry) : Sidebar
+    data object Search : Sidebar
+    data class Rename(val app: AppEntry) : Sidebar
 }
 
 class SidebarActions(
@@ -105,8 +130,18 @@ class SidebarActions(
     val appInfo: (AppEntry) -> Unit,
     val uninstall: (AppEntry) -> Unit,
     val system: (String) -> Unit,
-    val reset: () -> Unit
+    val reset: () -> Unit,
+    val rename: (String, String) -> Unit,
+    val moveFavorite: (String, Int) -> Unit,
+    val assistant: () -> Unit,
+    val ambientNow: () -> Unit
 )
+
+fun Sidebar.parent(): Sidebar = when (this) {
+    is Sidebar.Settings -> if (page == SettingsPage.Root) Sidebar.Closed else Sidebar.Settings(SettingsPage.Root)
+    is Sidebar.Rename -> Sidebar.Options(app)
+    else -> Sidebar.Closed
+}
 
 private class WallOption(val id: String, val name: String)
 
@@ -116,6 +151,9 @@ fun SidebarHost(
     prefs: LauncherPrefs,
     managerApps: List<AppEntry>,
     favorites: Set<String>,
+    favoriteOrder: List<String>,
+    usage: Map<String, Int>,
+    recents: List<AppEntry>,
     photo: ImageBitmap?,
     actions: SidebarActions,
     modifier: Modifier = Modifier
@@ -133,7 +171,9 @@ fun SidebarHost(
         ) { state ->
             when (state) {
                 is Sidebar.Settings -> SettingsPageContent(state.page, prefs, managerApps, photo, actions)
-                is Sidebar.Options -> OptionsPage(state.app, prefs, favorites, actions)
+                is Sidebar.Options -> OptionsPage(state.app, prefs, favorites, favoriteOrder, usage, actions)
+                Sidebar.Search -> SearchPage(managerApps, recents, prefs, actions)
+                is Sidebar.Rename -> RenamePage(state.app, actions)
                 Sidebar.Closed -> Spacer(Modifier.fillMaxSize())
             }
         }
@@ -180,6 +220,7 @@ private fun SettingsPageContent(
         PageHeader(page.title, back)
         when (page) {
             SettingsPage.Root -> RootPage(prefs, managerApps, first, actions)
+            SettingsPage.Quick -> QuickPage(first, actions)
             SettingsPage.Wallpaper -> WallpaperPage(prefs, photo, first, actions)
             SettingsPage.Appearance -> AppearancePage(prefs, first, actions)
             SettingsPage.Home -> HomePage(prefs, first, actions)
@@ -202,7 +243,10 @@ private fun RootPage(
         else -> WallpaperPresets.firstOrNull { it.id == prefs.wallpaper }?.name ?: "Ink"
     }
     val shown = managerApps.count { it.packageName !in prefs.hidden }
-    NavItem("Wallpaper", wallpaperName, Icons.Rounded.Photo, first) {
+    NavItem("Quick settings", "Volume, assistant, ambient clock", Icons.Rounded.Tune, first) {
+        actions.navigate(Sidebar.Settings(SettingsPage.Quick))
+    }
+    NavItem("Wallpaper", wallpaperName, Icons.Rounded.Photo, null) {
         actions.navigate(Sidebar.Settings(SettingsPage.Wallpaper))
     }
     NavItem("Appearance", "Accent, icon shape, clock", Icons.Rounded.Palette, null) {
@@ -273,7 +317,7 @@ private fun AppearancePage(prefs: LauncherPrefs, first: FocusRequester, actions:
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Accents.forEachIndexed { index, accent ->
+        (Accents + LocalWallpaperAccent.current).forEachIndexed { index, accent ->
             AccentDot(
                 accent = accent,
                 selected = index == prefs.accent,
@@ -342,6 +386,13 @@ private fun AppearancePage(prefs: LauncherPrefs, first: FocusRequester, actions:
     SwitchItem("Show greeting", null, prefs.showGreeting, null) {
         actions.edit { it.copy(showGreeting = !it.showGreeting) }
     }
+    SwitchItem("Status icons", "Network and battery in the header", prefs.showStatus, null) {
+        actions.edit { it.copy(showStatus = !it.showStatus) }
+    }
+    SideLabel("Ambient clock after")
+    ChoiceGroup(listOf("Off", "2 min", "5 min", "10 min"), prefs.ambient, null) { index ->
+        actions.edit { it.copy(ambient = index) }
+    }
 }
 
 @Composable
@@ -370,6 +421,13 @@ private fun HomePage(prefs: LauncherPrefs, first: FocusRequester, actions: Sideb
     SideLabel("Sort all apps")
     ChoiceGroup(listOf("A to Z", "Newest", "Most used"), prefs.sort, null) { index ->
         actions.edit { it.copy(sort = index) }
+    }
+    SideLabel("All apps")
+    SwitchItem("Show the All apps row", null, prefs.showAllRow, null) {
+        actions.edit { it.copy(showAllRow = !it.showAllRow) }
+    }
+    SwitchItem("Group by category", "Games, video, music and more", prefs.groupCategories, null) {
+        actions.edit { it.copy(groupCategories = !it.groupCategories) }
     }
 }
 
@@ -458,15 +516,20 @@ private fun OptionsPage(
     app: AppEntry,
     prefs: LauncherPrefs,
     favorites: Set<String>,
+    favoriteOrder: List<String>,
+    usage: Map<String, Int>,
     actions: SidebarActions
 ) {
+    val favoriteIndex = favoriteOrder.indexOf(app.packageName)
+    val opens = usage[app.packageName] ?: 0
     val first = rememberFirstFocus(app.packageName)
     val shape = IconShapes.getOrElse(prefs.iconShape) { IconShapes.first() }
     val isFavorite = app.packageName in favorites
     val meta = listOfNotNull(
         if (app.isTv) "Made for TV" else null,
         if (isFavorite) "Favorite" else null,
-        if (app.isSystem) "System app" else null
+        if (app.isSystem) "System app" else null,
+        if (opens > 0) "Opened $opens times" else null
     ).joinToString(" · ").ifEmpty { "Installed app" }
 
     Column(
@@ -517,6 +580,26 @@ private fun OptionsPage(
                 actions.toggleFavorite(app.packageName)
                 actions.close()
             }
+        )
+        if (isFavorite) {
+            SideItem(
+                title = "Move earlier",
+                icon = Icons.Rounded.ChevronLeft,
+                enabled = favoriteIndex > 0,
+                onClick = { actions.moveFavorite(app.packageName, -1) }
+            )
+            SideItem(
+                title = "Move later",
+                icon = Icons.Rounded.ChevronRight,
+                enabled = favoriteIndex in 0 until favoriteOrder.lastIndex,
+                onClick = { actions.moveFavorite(app.packageName, 1) }
+            )
+        }
+        SideItem(
+            title = "Rename",
+            subtitle = if (app.label != app.systemLabel) "Originally ${app.systemLabel}" else null,
+            icon = Icons.Rounded.Edit,
+            onClick = { actions.navigate(Sidebar.Rename(app)) }
         )
         SideItem(
             title = "Hide from home screen",
@@ -602,6 +685,7 @@ private fun SideItem(
     tint: Color? = null,
     requester: FocusRequester? = null,
     trailing: (@Composable () -> Unit)? = null,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     val shapeAt = remember { roundedMorph(18.dp, 26.dp) }
@@ -614,10 +698,13 @@ private fun SideItem(
         ringWidth = 0.dp,
         focusedScale = 1f,
         focusRequester = requester,
-        onClick = onClick
+        onClick = { if (enabled) onClick() }
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .graphicsLayer { alpha = if (enabled) 1f else 0.4f }
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -879,6 +966,194 @@ private fun WallpaperTile(
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.padding(top = 8.dp, start = 4.dp)
+        )
+    }
+}
+
+@Composable
+private fun QuickPage(first: FocusRequester, actions: SidebarActions) {
+    val context = LocalContext.current
+    val audio = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    val maxVolume = remember { audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1) }
+    var volume by remember { mutableFloatStateOf(audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()) }
+
+    SideLabel("Media volume")
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.VolumeUp,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(24.dp)
+        )
+        Slider(
+            value = volume,
+            onValueChange = {
+                volume = it
+                runCatching { audio.setStreamVolume(AudioManager.STREAM_MUSIC, it.roundToInt(), 0) }
+            },
+            valueRange = 0f..maxVolume.toFloat(),
+            steps = (maxVolume - 1).coerceAtLeast(0),
+            modifier = Modifier.weight(1f).focusRequester(first)
+        )
+        Text(
+            text = volume.roundToInt().toString(),
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+    SideLabel("Shortcuts")
+    NavItem("Assistant", "Ask or search by voice", Icons.Rounded.Mic, null) { actions.assistant() }
+    NavItem("Ambient clock", "Dim the screen and show the time", Icons.Rounded.Schedule, null) { actions.ambientNow() }
+    NavItem("Wi-Fi and network", null, Icons.Rounded.Wifi, null) {
+        actions.system(android.provider.Settings.ACTION_WIFI_SETTINGS)
+    }
+    NavItem("Bluetooth", null, Icons.Rounded.Bluetooth, null) {
+        actions.system(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
+    }
+    NavItem("Display", null, Icons.Rounded.Tv, null) {
+        actions.system(android.provider.Settings.ACTION_DISPLAY_SETTINGS)
+    }
+}
+
+@Composable
+private fun fieldColors() = TextFieldDefaults.colors(
+    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+    disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+    focusedIndicatorColor = Color.Transparent,
+    unfocusedIndicatorColor = Color.Transparent,
+    disabledIndicatorColor = Color.Transparent
+)
+
+@Composable
+private fun SearchPage(
+    apps: List<AppEntry>,
+    recents: List<AppEntry>,
+    prefs: LauncherPrefs,
+    actions: SidebarActions
+) {
+    val shape = IconShapes.getOrElse(prefs.iconShape) { IconShapes.first() }
+    var query by remember { mutableStateOf("") }
+    val first = rememberFirstFocus("search")
+    val results = remember(query, apps, recents) {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) {
+            recents.take(8)
+        } else {
+            apps.filter { it.label.lowercase().contains(q) }
+                .sortedWith(
+                    compareByDescending<AppEntry> { it.label.lowercase().startsWith(q) }
+                        .thenBy { it.label.lowercase() }
+                )
+                .take(40)
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        PageHeader("Search", actions.close)
+        TextField(
+            value = query,
+            onValueChange = { query = it },
+            modifier = Modifier.fillMaxWidth().focusRequester(first),
+            singleLine = true,
+            shape = RoundedCornerShape(26.dp),
+            placeholder = { Text("Search apps") },
+            leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+            colors = fieldColors(),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(
+                onSearch = {
+                    results.firstOrNull()?.let {
+                        actions.close()
+                        actions.open(it)
+                    }
+                }
+            )
+        )
+        SideLabel(if (query.isBlank()) "Recent" else "Results")
+        if (results.isEmpty()) {
+            Text(
+                text = if (query.isBlank()) "Nothing opened yet." else "No apps match that.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp)
+            )
+        }
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            items(results, key = { it.packageName }) { app ->
+                SideItem(
+                    title = app.label,
+                    leading = {
+                        Image(
+                            bitmap = app.icon,
+                            contentDescription = null,
+                            modifier = Modifier.size(36.dp).clip(shape.still)
+                        )
+                    },
+                    onClick = {
+                        actions.close()
+                        actions.open(app)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RenamePage(app: AppEntry, actions: SidebarActions) {
+    var text by remember(app.packageName) { mutableStateOf(app.label) }
+    val first = rememberFirstFocus("rename:" + app.packageName)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        PageHeader("Rename") { actions.navigate(Sidebar.Options(app)) }
+        TextField(
+            value = text,
+            onValueChange = { text = it },
+            modifier = Modifier.fillMaxWidth().focusRequester(first),
+            singleLine = true,
+            shape = RoundedCornerShape(26.dp),
+            colors = fieldColors(),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(
+                onDone = {
+                    actions.rename(app.packageName, text)
+                    actions.close()
+                }
+            )
+        )
+        Spacer(Modifier.height(8.dp))
+        SideItem(
+            title = "Save",
+            icon = Icons.Rounded.Check,
+            onClick = {
+                actions.rename(app.packageName, text)
+                actions.close()
+            }
+        )
+        SideItem(
+            title = "Use the original name",
+            subtitle = app.systemLabel,
+            icon = Icons.Rounded.Refresh,
+            onClick = {
+                actions.rename(app.packageName, "")
+                actions.close()
+            }
         )
     }
 }

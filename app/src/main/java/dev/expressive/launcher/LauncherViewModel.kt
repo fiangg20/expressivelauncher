@@ -14,6 +14,7 @@ import android.graphics.Matrix
 import android.graphics.drawable.Drawable
 import android.media.ExifInterface
 import android.net.Uri
+import android.os.SystemClock
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -21,9 +22,11 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.io.File
+import org.json.JSONObject
 import kotlin.math.max
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -57,10 +60,75 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private val _photo = MutableStateFlow<ImageBitmap?>(null)
     val photo: StateFlow<ImageBitmap?> = _photo.asStateFlow()
 
+    private val _names = MutableStateFlow(readNames())
+    val names: StateFlow<Map<String, String>> = _names.asStateFlow()
+
+    private val _ambient = MutableStateFlow(false)
+    val ambient: StateFlow<Boolean> = _ambient.asStateFlow()
+
+    private var lastInput = SystemClock.elapsedRealtime()
+    private var ambientSince = 0L
+    private var foreground = false
+
     private var loadJob: Job? = null
 
     init {
         if (_settings.value.wallpaper == "photo") loadPhoto()
+        viewModelScope.launch {
+            while (true) {
+                delay(4000)
+                val minutes = when (_settings.value.ambient) {
+                    1 -> 2
+                    2 -> 5
+                    3 -> 10
+                    else -> 0
+                }
+                val idle = SystemClock.elapsedRealtime() - lastInput
+                if (minutes > 0 && foreground && !_ambient.value && idle > minutes * 60_000L) startAmbient()
+            }
+        }
+    }
+
+    fun touch() {
+        lastInput = SystemClock.elapsedRealtime()
+    }
+
+    fun setForeground(value: Boolean) {
+        foreground = value
+        touch()
+        if (!value) _ambient.value = false
+    }
+
+    fun startAmbient() {
+        touch()
+        ambientSince = SystemClock.elapsedRealtime()
+        _ambient.value = true
+    }
+
+    fun wakeIfAmbient(): Boolean {
+        if (!_ambient.value) return false
+        if (SystemClock.elapsedRealtime() - ambientSince < 700) return true
+        _ambient.value = false
+        touch()
+        return true
+    }
+
+    fun rename(packageName: String, name: String) {
+        val next = _names.value.toMutableMap()
+        if (name.isBlank()) next.remove(packageName) else next[packageName] = name.trim()
+        _names.value = next
+        prefs.edit().putString("names", JSONObject(next).toString()).apply()
+    }
+
+    fun moveFavorite(packageName: String, delta: Int) {
+        val list = _favorites.value.toMutableList()
+        val index = list.indexOf(packageName)
+        val target = index + delta
+        if (index < 0 || target !in list.indices) return
+        list.removeAt(index)
+        list.add(target, packageName)
+        _favorites.value = list
+        writeList("favorites", list)
     }
 
     fun refresh() {
@@ -135,6 +203,10 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         showMostUsed = prefs.getBoolean("showMostUsed", false),
         sort = prefs.getInt("sort", 0),
         showSystem = prefs.getBoolean("showSystem", false),
+        showStatus = prefs.getBoolean("showStatus", true),
+        ambient = prefs.getInt("ambient", 0),
+        showAllRow = prefs.getBoolean("showAllRow", true),
+        groupCategories = prefs.getBoolean("groupCategories", false),
         hidden = readList("hidden").toSet()
     )
 
@@ -157,6 +229,10 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             .putBoolean("showMostUsed", p.showMostUsed)
             .putInt("sort", p.sort)
             .putBoolean("showSystem", p.showSystem)
+            .putBoolean("showStatus", p.showStatus)
+            .putInt("ambient", p.ambient)
+            .putBoolean("showAllRow", p.showAllRow)
+            .putBoolean("groupCategories", p.groupCategories)
             .putString("hidden", p.hidden.joinToString(","))
             .apply()
     }
@@ -167,6 +243,11 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             val count = parts.getOrNull(1)?.toIntOrNull()
             if (parts.size == 2 && count != null && parts[0].isNotBlank()) parts[0] to count else null
         }.toMap()
+
+    private fun readNames(): Map<String, String> = runCatching {
+        val json = JSONObject(prefs.getString("names", "{}").orEmpty())
+        json.keys().asSequence().associateWith { json.getString(it) }
+    }.getOrDefault(emptyMap())
 
     private fun photoFile(): File = File(getApplication<Application>().filesDir, "wallpaper.jpg")
 
@@ -279,10 +360,12 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                     val activity = info.activityInfo
                     val flags = activity.applicationInfo.flags
                     val iconBitmap = renderIcon(info.loadIcon(pm))
+                    val appLabel = info.loadLabel(pm).toString()
                     AppEntry(
                         packageName = activity.packageName,
                         activityName = activity.name,
-                        label = info.loadLabel(pm).toString(),
+                        label = appLabel,
+                        systemLabel = appLabel,
                         icon = iconBitmap.asImageBitmap(),
                         banner = if (isTv) {
                             runCatching { activity.loadBanner(pm)?.toBitmap(320, 180)?.asImageBitmap() }.getOrNull()
@@ -290,6 +373,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                             null
                         },
                         tint = tintOf(iconBitmap),
+                        category = activity.applicationInfo.category,
                         isTv = isTv,
                         isSystem = (flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
                             (flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0,

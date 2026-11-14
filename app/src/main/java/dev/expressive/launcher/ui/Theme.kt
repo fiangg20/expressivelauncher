@@ -9,7 +9,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.remember
+import android.graphics.Color as AndroidColor
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -34,6 +36,19 @@ val Accents = listOf(
     Accent("Sky", Color(0xFF9FCAFF), Color(0xFF00315C), Color(0xFF00497F), Color(0xFFD2E4FF)),
     Accent("Graphite", Color(0xFFC9CCD6), Color(0xFF2B2E36), Color(0xFF3B3F4A), Color(0xFFE1E3EC))
 )
+
+val LocalWallpaperAccent = compositionLocalOf { Accents.first() }
+
+fun accentFromSeed(seed: Color): Accent {
+    val hsv = FloatArray(3)
+    AndroidColor.colorToHSV(seed.toArgb(), hsv)
+    val neutral = hsv[1] < 0.1f
+    val hue = hsv[0]
+    val sat = hsv[1].coerceIn(0.35f, 0.9f)
+    fun tone(s: Float, v: Float): Color =
+        Color(AndroidColor.HSVToColor(floatArrayOf(hue, if (neutral) 0.04f else s, v)))
+    return Accent("Wallpaper", tone(sat * 0.4f, 0.97f), tone(sat, 0.28f), tone(sat * 0.75f, 0.42f), tone(sat * 0.12f, 0.99f))
+}
 
 private val BaseDark = darkColorScheme(
     secondary = Color(0xFFBFC6DC),
@@ -84,10 +99,11 @@ private val BaseTypography = Typography(
 )
 
 @Composable
-fun LauncherTheme(accentIndex: Int, calmMotion: Boolean, content: @Composable () -> Unit) {
+fun LauncherTheme(accentIndex: Int, calmMotion: Boolean, wallpaperSeed: Color, content: @Composable () -> Unit) {
     val context = LocalContext.current
     val typography = remember { BaseTypography.withFamily(launcherFontFamily(context)) }
-    val accent = Accents.getOrElse(accentIndex) { Accents.first() }
+    val dynamicAccent = remember(wallpaperSeed) { accentFromSeed(wallpaperSeed) }
+    val accent = if (accentIndex >= Accents.size) dynamicAccent else Accents[accentIndex]
     val scheme = remember(accent) {
         BaseDark.copy(
             primary = accent.primary,
@@ -100,7 +116,7 @@ fun LauncherTheme(accentIndex: Int, calmMotion: Boolean, content: @Composable ()
             onTertiaryContainer = accent.onContainer
         )
     }
-    CompositionLocalProvider(LocalCalmMotion provides calmMotion) {
+    CompositionLocalProvider(LocalCalmMotion provides calmMotion, LocalWallpaperAccent provides dynamicAccent) {
         MaterialTheme(
             colorScheme = scheme,
             shapes = LauncherShapes,

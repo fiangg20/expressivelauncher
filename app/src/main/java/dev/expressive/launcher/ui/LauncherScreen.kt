@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -30,6 +31,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -39,6 +41,8 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.CircularProgressIndicator
@@ -66,9 +70,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -80,6 +86,7 @@ import dev.expressive.launcher.AppEntry
 import dev.expressive.launcher.LauncherPrefs
 import dev.expressive.launcher.LauncherViewModel
 import dev.expressive.launcher.launchApp
+import dev.expressive.launcher.launchAssistant
 import dev.expressive.launcher.openAppInfo
 import dev.expressive.launcher.openSystemSettings
 import dev.expressive.launcher.toast
@@ -109,6 +116,27 @@ private data class ClockText(
     val greeting: String
 )
 
+private val CategoryOrder = listOf(2, 0, 1, 3, 4, 5, 6, 7, -1)
+
+private fun categoryTitle(category: Int): String = when (category) {
+    0 -> "Games"
+    1 -> "Music"
+    2 -> "Video"
+    3 -> "Photos"
+    4 -> "Social"
+    5 -> "News"
+    6 -> "Maps"
+    7 -> "Productivity"
+    else -> "Other"
+}
+
+private fun categorySections(apps: List<AppEntry>): List<Section> {
+    val grouped = apps.groupBy { if (it.category in 0..7) it.category else -1 }
+    return CategoryOrder.mapNotNull { category ->
+        grouped[category]?.takeIf { it.isNotEmpty() }?.let { Section("cat:$category", categoryTitle(category), it) }
+    }
+}
+
 @Composable
 fun LauncherScreen(viewModel: LauncherViewModel) {
     val context = LocalContext.current
@@ -116,14 +144,27 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     val favorites by viewModel.favorites.collectAsStateWithLifecycle()
     val recents by viewModel.recents.collectAsStateWithLifecycle()
     val usage by viewModel.usage.collectAsStateWithLifecycle()
+    val names by viewModel.names.collectAsStateWithLifecycle()
+    val ambient by viewModel.ambient.collectAsStateWithLifecycle()
     val homeSignal by viewModel.homeSignal.collectAsStateWithLifecycle()
     val prefs by viewModel.settings.collectAsStateWithLifecycle()
     val photo by viewModel.photo.collectAsStateWithLifecycle()
+    val status = rememberStatus()
 
     val isTv = remember { context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) }
     val iconShape = IconShapes.getOrElse(prefs.iconShape) { IconShapes.first() }
 
-    val managerApps = remember(apps, prefs.showSystem) { apps.filter { prefs.showSystem || !it.isSystem } }
+    val named = remember(apps, names) {
+        if (names.isEmpty()) {
+            apps
+        } else {
+            apps.map { app ->
+                val custom = names[app.packageName]
+                if (custom.isNullOrBlank()) app else app.copy(label = custom)
+            }
+        }
+    }
+    val managerApps = remember(named, prefs.showSystem) { named.filter { prefs.showSystem || !it.isSystem } }
     val visible = remember(managerApps, prefs.hidden) { managerApps.filter { it.packageName !in prefs.hidden } }
     val byPackage = remember(visible) { visible.associateBy { it.packageName } }
     val allApps = remember(visible, prefs.sort, usage) {
@@ -132,11 +173,15 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
             2 -> visible.sortedWith(
                 compareByDescending<AppEntry> { usage[it.packageName] ?: 0 }.thenBy { it.label.lowercase() }
             )
-            else -> visible
+            else -> visible.sortedBy { it.label.lowercase() }
         }
     }
     val favoriteApps = remember(byPackage, favorites) { favorites.mapNotNull { byPackage[it] } }
     val recentApps = remember(byPackage, recents) { recents.mapNotNull { byPackage[it] } }
+    val searchRecents = remember(managerApps, recents) {
+        val lookup = managerApps.associateBy { it.packageName }
+        recents.mapNotNull { lookup[it] }
+    }
     val mostUsedApps = remember(byPackage, usage) {
         usage.entries
             .filter { it.value > 0 && it.key in byPackage }
@@ -145,12 +190,17 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
             .mapNotNull { byPackage[it.key] }
     }
     val favoriteSet = remember(favorites) { favorites.toSet() }
-    val sections = remember(prefs.showFavorites, prefs.showRecent, prefs.showMostUsed, favoriteApps, recentApps, mostUsedApps, allApps) {
+    val sections = remember(
+        prefs.showFavorites, prefs.showRecent, prefs.showMostUsed, prefs.showAllRow, prefs.groupCategories,
+        favoriteApps, recentApps, mostUsedApps, allApps
+    ) {
         buildList {
             if (prefs.showFavorites && favoriteApps.isNotEmpty()) add(Section("favorites", "Favorites", favoriteApps))
             if (prefs.showRecent && recentApps.isNotEmpty()) add(Section("recent", "Recent", recentApps))
             if (prefs.showMostUsed && mostUsedApps.isNotEmpty()) add(Section("most", "Most used", mostUsedApps))
-            if (allApps.isNotEmpty()) add(Section("all", "All apps", allApps))
+            if (prefs.showAllRow && allApps.isNotEmpty()) {
+                if (prefs.groupCategories) addAll(categorySections(allApps)) else add(Section("all", "All apps", allApps))
+            }
         }
     }
     val firstKey = sections.firstOrNull()?.let { "${it.id}:${it.apps.first().packageName}" }
@@ -226,6 +276,13 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
         reset = {
             viewModel.resetCustomization()
             context.toast("Customization reset")
+        },
+        rename = { packageName, name -> viewModel.rename(packageName, name) },
+        moveFavorite = { packageName, delta -> viewModel.moveFavorite(packageName, delta) },
+        assistant = { context.launchAssistant() },
+        ambientNow = {
+            sidebar = Sidebar.Closed
+            viewModel.startAmbient()
         }
     )
 
@@ -262,10 +319,7 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
         scope.launch { listState.animateScrollToItem(0) }
     }
     BackHandler(enabled = sidebarOpen) {
-        sidebar = when (val current = sidebar) {
-            is Sidebar.Settings -> if (current.page == SettingsPage.Root) Sidebar.Closed else Sidebar.Settings(SettingsPage.Root)
-            else -> Sidebar.Closed
-        }
+        sidebar = sidebar.parent()
     }
 
     BoxWithConstraints(
@@ -315,7 +369,10 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
                     hint = if (isTv) "Hold OK for options" else "Long press for options",
                     iconShape = iconShape,
                     registry = registry,
-                    onSettingsFocused = { focused.value = null },
+                    status = status,
+                    onHeaderFocused = { focused.value = null },
+                    onSearch = { sidebar = Sidebar.Search },
+                    onAssistant = { context.launchAssistant() },
                     onSettings = { sidebar = Sidebar.Settings() }
                 )
 
@@ -332,7 +389,7 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
                         contentAlignment = Alignment.CenterStart
                     ) {
                         Text(
-                            text = "No apps to show. Open Settings, then Apps to change what appears here.",
+                            text = "Nothing to show here. Open Settings, then Home screen or Apps, to change what appears.",
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -389,10 +446,76 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
                 prefs = prefs,
                 managerApps = managerApps,
                 favorites = favoriteSet,
+                favoriteOrder = favorites,
+                usage = usage,
+                recents = searchRecents,
                 photo = photo,
                 actions = actions,
                 modifier = Modifier.width(sidebarWidth)
             )
+        }
+
+        AnimatedVisibility(
+            visible = ambient,
+            enter = fadeIn(tween(700)),
+            exit = fadeOut(tween(250))
+        ) {
+            AmbientClock(clock = clock, now = now, status = status, showStatus = prefs.showStatus)
+        }
+    }
+}
+
+@Composable
+private fun AmbientClock(clock: ClockText, now: Long, status: State<StatusInfo>, showStatus: Boolean) {
+    val minute = remember(now) { ((now / 60_000L) % 60L).toInt() }
+    BoxWithConstraints(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        val blockWidth = 380.dp
+        val blockHeight = 200.dp
+        val fx = ((minute * 37) % 60) / 60f
+        val fy = ((minute * 53) % 60) / 60f
+        val x = animateDpAsState(
+            targetValue = (maxWidth - blockWidth).coerceAtLeast(0.dp) * fx,
+            animationSpec = tween(4000),
+            label = "ambientX"
+        )
+        val y = animateDpAsState(
+            targetValue = (maxHeight - blockHeight).coerceAtLeast(0.dp) * fy,
+            animationSpec = tween(4000),
+            label = "ambientY"
+        )
+        Column(
+            modifier = Modifier.offset { IntOffset(x.value.roundToPx(), y.value.roundToPx()) }
+        ) {
+            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = clock.time,
+                    style = MaterialTheme.typography.displayLarge.copy(
+                        fontSize = 88.sp,
+                        lineHeight = 92.sp,
+                        fontWeight = FontWeight.Normal,
+                        fontFeatureSettings = "tnum"
+                    ),
+                    color = Color(0xFFE4E2E6).copy(alpha = 0.85f),
+                    maxLines = 1
+                )
+                if (clock.period.isNotEmpty()) {
+                    Text(
+                        text = clock.period,
+                        style = MaterialTheme.typography.titleLarge,
+                        color = Color(0xFFE4E2E6).copy(alpha = 0.55f),
+                        modifier = Modifier.padding(bottom = 10.dp)
+                    )
+                }
+            }
+            Text(
+                text = clock.date,
+                style = MaterialTheme.typography.titleMedium,
+                color = Color(0xFFE4E2E6).copy(alpha = 0.55f)
+            )
+            if (showStatus) {
+                Spacer(Modifier.height(12.dp))
+                StatusChips(status)
+            }
         }
     }
 }
@@ -408,7 +531,10 @@ private fun Header(
     hint: String,
     iconShape: IconShape,
     registry: FocusRegistry,
-    onSettingsFocused: () -> Unit,
+    status: State<StatusInfo>,
+    onHeaderFocused: () -> Unit,
+    onSearch: () -> Unit,
+    onAssistant: () -> Unit,
     onSettings: () -> Unit
 ) {
     Row(
@@ -427,7 +553,19 @@ private fun Header(
                 compact = compact
             )
         }
-        SettingsButton(registry, onSettingsFocused, onSettings)
+        Row(
+            modifier = Modifier.padding(top = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp)
+        ) {
+            if (prefs.showStatus && !compact) {
+                StatusChips(status)
+                Spacer(Modifier.width(4.dp))
+            }
+            HeaderButton(registry, "search", Icons.Rounded.Search, "Search", compact, onHeaderFocused, onSearch)
+            HeaderButton(registry, "assistant", Icons.Rounded.Mic, "Assistant", compact, onHeaderFocused, onAssistant)
+            HeaderButton(registry, "settings", Icons.Rounded.Settings, "Settings", compact, onHeaderFocused, onSettings)
+        }
     }
 }
 
@@ -489,19 +627,23 @@ private fun Clock(clock: ClockText, prefs: LauncherPrefs, compact: Boolean) {
 }
 
 @Composable
-private fun SettingsButton(
+private fun HeaderButton(
     registry: FocusRegistry,
+    key: String,
+    icon: ImageVector,
+    description: String,
+    compact: Boolean,
     onFocused: () -> Unit,
     onClick: () -> Unit
 ) {
     val requester = remember { FocusRequester() }
-    DisposableEffect(Unit) {
-        registry.map["settings"] = requester
-        onDispose { registry.map.remove("settings") }
+    DisposableEffect(key) {
+        registry.map[key] = requester
+        onDispose { registry.map.remove(key) }
     }
     val shapeAt = remember { cookieMorph(8, 0f, 0.1f, 1.4f) }
     FocusSurface(
-        modifier = Modifier.size(56.dp),
+        modifier = Modifier.size(if (compact) 44.dp else 56.dp),
         shapeAt = shapeAt,
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         focusedContainerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -511,17 +653,17 @@ private fun SettingsButton(
         focusRequester = requester,
         onFocusChange = {
             if (it) {
-                registry.last = "settings"
+                registry.last = key
                 onFocused()
             }
         },
         onClick = onClick
     ) {
         Icon(
-            imageVector = Icons.Rounded.Settings,
-            contentDescription = "Settings",
+            imageVector = icon,
+            contentDescription = description,
             tint = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.align(Alignment.Center).size(26.dp)
+            modifier = Modifier.align(Alignment.Center).size(if (compact) 22.dp else 26.dp)
         )
     }
 }

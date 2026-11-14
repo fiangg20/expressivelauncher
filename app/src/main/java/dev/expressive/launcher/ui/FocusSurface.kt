@@ -27,6 +27,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
@@ -110,6 +115,16 @@ fun FocusSurface(
             .onFocusChanged { state ->
                 focused = state.isFocused
                 onFocusChange(state.isFocused)
+            }
+            .onKeyEvent { event ->
+                if (onLongClick != null && event.type == KeyEventType.KeyUp &&
+                    (event.key == Key.Menu || event.key == Key.Info)
+                ) {
+                    onLongClick()
+                    true
+                } else {
+                    false
+                }
             }
             .combinedClickable(
                 interactionSource = interaction,
