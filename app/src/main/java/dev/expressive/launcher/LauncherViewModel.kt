@@ -11,7 +11,9 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Matrix
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
+import android.media.tv.TvInputManager
 import android.media.ExifInterface
 import android.net.Uri
 import android.os.SystemClock
@@ -22,6 +24,11 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import kotlin.math.roundToInt
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.max
 import kotlinx.coroutines.Dispatchers
@@ -69,6 +76,15 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private val _quickSignal = MutableStateFlow(0)
     val quickSignal: StateFlow<Int> = _quickSignal.asStateFlow()
 
+    private val _collections = MutableStateFlow(readCollections())
+    val collections: StateFlow<Map<String, List<String>>> = _collections.asStateFlow()
+
+    private val _inputs = MutableStateFlow<List<AppEntry>>(emptyList())
+    val inputs: StateFlow<List<AppEntry>> = _inputs.asStateFlow()
+
+    private val _weather = MutableStateFlow<WeatherInfo?>(null)
+    val weather: StateFlow<WeatherInfo?> = _weather.asStateFlow()
+
     private val _ambient = MutableStateFlow(false)
     val ambient: StateFlow<Boolean> = _ambient.asStateFlow()
 
@@ -80,6 +96,12 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
 
     init {
         if (_settings.value.wallpaper == "photo") loadPhoto()
+        viewModelScope.launch {
+            while (true) {
+                refreshWeather()
+                delay(30 * 60_000L)
+            }
+        }
         viewModelScope.launch {
             while (true) {
                 delay(4000)
@@ -110,6 +132,139 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
 
     fun armOkGuard() {
         if (okHeld) swallowOk = true
+    }
+
+    private class Place(val name: String, val lat: Float, val lon: Float)
+
+    private fun httpGet(address: String): String {
+        val connection = URL(address).openConnection() as HttpURLConnection
+        connection.connectTimeout = 8000
+        connection.readTimeout = 8000
+        return try {
+            connection.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun geocode(query: String): Place? {
+        val body = httpGet(
+            "https://geocoding-api.open-meteo.com/v1/search?name=" +
+                URLEncoder.encode(query, "UTF-8") + "&count=1&language=en&format=json"
+        )
+        val results = JSONObject(body).optJSONArray("results") ?: return null
+        if (results.length() == 0) return null
+        val first = results.getJSONObject(0)
+        val label = listOf(first.optString("name"), first.optString("country"))
+            .filter { it.isNotBlank() }
+            .joinToString(", ")
+        return Place(label, first.getDouble("latitude").toFloat(), first.getDouble("longitude").toFloat())
+    }
+
+    private fun fetchWeather(p: LauncherPrefs): WeatherInfo {
+        val unit = if (p.fahrenheit) "fahrenheit" else "celsius"
+        val body = httpGet(
+            "https://api.open-meteo.com/v1/forecast?latitude=${p.weatherLat}&longitude=${p.weatherLon}" +
+                "&current=temperature_2m,weather_code&temperature_unit=$unit"
+        )
+        val current = JSONObject(body).getJSONObject("current")
+        return WeatherInfo(current.getDouble("temperature_2m").roundToInt(), current.getInt("weather_code"))
+    }
+
+    fun refreshWeather() {
+        val p = _settings.value
+        if (!p.showWeather || (p.weatherLat == 0f && p.weatherLon == 0f)) {
+            _weather.value = null
+            return
+        }
+        viewModelScope.launch {
+            val fetched = withContext(Dispatchers.IO) { runCatching { fetchWeather(p) }.getOrNull() }
+            if (fetched != null) _weather.value = fetched
+        }
+    }
+
+    fun lookupCity(query: String) {
+        if (query.isBlank()) return
+        viewModelScope.launch {
+            val found = withContext(Dispatchers.IO) { runCatching { geocode(query.trim()) }.getOrNull() }
+            val app = getApplication<Application>()
+            if (found == null) {
+                app.toast("City not found")
+            } else {
+                edit { it.copy(showWeather = true, weatherName = found.name, weatherLat = found.lat, weatherLon = found.lon) }
+                app.toast("Weather set to " + found.name)
+            }
+        }
+    }
+
+    private fun readCollections(): Map<String, List<String>> = runCatching {
+        val json = JSONObject(prefs.getString("collections", "{}").orEmpty())
+        val result = LinkedHashMap<String, List<String>>()
+        for (key in json.keys()) {
+            val array = json.getJSONArray(key)
+            result[key] = (0 until array.length()).map { array.getString(it) }
+        }
+        result as Map<String, List<String>>
+    }.getOrDefault(emptyMap())
+
+    private fun writeCollections(map: Map<String, List<String>>) {
+        val json = JSONObject()
+        for ((name, list) in map) json.put(name, JSONArray(list))
+        prefs.edit().putString("collections", json.toString()).apply()
+    }
+
+    fun toggleInCollection(name: String, packageName: String) {
+        val next = LinkedHashMap(_collections.value)
+        val list = next[name].orEmpty()
+        next[name] = if (packageName in list) list - packageName else list + packageName
+        _collections.value = next
+        writeCollections(next)
+    }
+
+    fun createCollection(name: String, firstPackage: String?) {
+        val clean = name.trim()
+        if (clean.isEmpty()) return
+        val next = LinkedHashMap(_collections.value)
+        var list = next[clean].orEmpty()
+        if (firstPackage != null && firstPackage !in list) list = list + firstPackage
+        next[clean] = list
+        _collections.value = next
+        writeCollections(next)
+    }
+
+    fun deleteCollection(name: String) {
+        val next = LinkedHashMap(_collections.value)
+        next.remove(name)
+        _collections.value = next
+        writeCollections(next)
+    }
+
+    private fun queryInputs(): List<AppEntry> {
+        val context = getApplication<Application>()
+        val manager = context.getSystemService(Context.TV_INPUT_SERVICE) as? TvInputManager ?: return emptyList()
+        return runCatching {
+            manager.tvInputList.filter { it.isPassthroughInput }.mapNotNull { input ->
+                runCatching {
+                    val label = input.loadCustomLabel(context)?.toString()?.takeIf { it.isNotBlank() }
+                        ?: input.loadLabel(context).toString()
+                    val drawable = input.loadIcon(context) ?: ColorDrawable(0xFF3B4252.toInt())
+                    AppEntry(
+                        packageName = "input:" + input.id,
+                        activityName = input.id,
+                        label = label,
+                        systemLabel = label,
+                        icon = renderIcon(drawable).asImageBitmap(),
+                        banner = null,
+                        tint = Color(0xFF5E81AC),
+                        category = -1,
+                        autoCategory = -1,
+                        isTv = true,
+                        isSystem = false,
+                        installedAt = 0L
+                    )
+                }.getOrNull()
+            }
+        }.getOrDefault(emptyList())
     }
 
     fun toggleQuick() {
@@ -171,6 +326,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         loadJob?.cancel()
         loadJob = viewModelScope.launch {
             _apps.value = withContext(Dispatchers.Default) { queryApps() }
+            _inputs.value = withContext(Dispatchers.Default) { queryInputs() }
         }
     }
 
@@ -179,9 +335,15 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun edit(transform: (LauncherPrefs) -> LauncherPrefs) {
-        val next = transform(_settings.value)
+        val old = _settings.value
+        val next = transform(old)
         _settings.value = next
         savePrefs(next)
+        if (next.showWeather != old.showWeather || next.weatherLat != old.weatherLat ||
+            next.weatherLon != old.weatherLon || next.fahrenheit != old.fahrenheit
+        ) {
+            refreshWeather()
+        }
     }
 
     fun selectWallpaper(id: String) {
@@ -226,7 +388,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         dim = prefs.getInt("dim", 1),
         accent = prefs.getInt("accent", 0),
         iconShape = prefs.getInt("iconShape", 0),
-        calmMotion = prefs.getBoolean("calm", false),
+        motion = prefs.getInt("motion", 0),
         clockMode = prefs.getInt("clockMode", 0),
         timeFormat = prefs.getInt("timeFormat", 0),
         showDate = prefs.getBoolean("showDate", true),
@@ -240,6 +402,14 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         sort = prefs.getInt("sort", 0),
         showSystem = prefs.getBoolean("showSystem", false),
         showStatus = prefs.getBoolean("showStatus", true),
+        showCollections = prefs.getBoolean("showCollections", true),
+        showInputs = prefs.getBoolean("showInputs", true),
+        showWeather = prefs.getBoolean("showWeather", false),
+        weatherName = prefs.getString("weatherName", "").orEmpty(),
+        weatherLat = prefs.getFloat("weatherLat", 0f),
+        weatherLon = prefs.getFloat("weatherLon", 0f),
+        fahrenheit = prefs.getBoolean("fahrenheit", false),
+        userName = prefs.getString("userName", "").orEmpty(),
         ambient = prefs.getInt("ambient", 0),
         showAllRow = prefs.getBoolean("showAllRow", true),
         groupCategories = prefs.getBoolean("groupCategories", false),
@@ -252,7 +422,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             .putInt("dim", p.dim)
             .putInt("accent", p.accent)
             .putInt("iconShape", p.iconShape)
-            .putBoolean("calm", p.calmMotion)
+            .putInt("motion", p.motion)
             .putInt("clockMode", p.clockMode)
             .putInt("timeFormat", p.timeFormat)
             .putBoolean("showDate", p.showDate)
@@ -266,6 +436,14 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             .putInt("sort", p.sort)
             .putBoolean("showSystem", p.showSystem)
             .putBoolean("showStatus", p.showStatus)
+            .putBoolean("showCollections", p.showCollections)
+            .putBoolean("showInputs", p.showInputs)
+            .putBoolean("showWeather", p.showWeather)
+            .putString("weatherName", p.weatherName)
+            .putFloat("weatherLat", p.weatherLat)
+            .putFloat("weatherLon", p.weatherLon)
+            .putBoolean("fahrenheit", p.fahrenheit)
+            .putString("userName", p.userName)
             .putInt("ambient", p.ambient)
             .putBoolean("showAllRow", p.showAllRow)
             .putBoolean("groupCategories", p.groupCategories)

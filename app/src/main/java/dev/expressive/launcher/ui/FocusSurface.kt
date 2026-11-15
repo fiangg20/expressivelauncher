@@ -4,6 +4,7 @@ package dev.expressive.launcher.ui
 
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -30,6 +31,8 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.nativeKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.Dp
@@ -57,31 +60,32 @@ fun FocusSurface(
     onClick: () -> Unit,
     content: @Composable BoxScope.() -> Unit
 ) {
-    val calm = LocalCalmMotion.current
+    val motion = LocalMotion.current
     var focused by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val longHandled = remember { booleanArrayOf(false) }
+    val downSeen = remember { booleanArrayOf(false) }
 
     LaunchedEffect(pressed) {
         if (pressed) longHandled[0] = false
     }
 
     val scale = animateFloatAsState(
-        targetValue = if (pressed) 0.95f else if (focused) focusedScale else 1f,
-        animationSpec = if (calm) {
-            spring<Float>(dampingRatio = 1f, stiffness = Spring.StiffnessMedium)
-        } else {
-            spring<Float>(dampingRatio = 0.55f, stiffness = Spring.StiffnessMediumLow)
+        targetValue = if (motion == 2) 1f else if (pressed) 0.95f else if (focused) focusedScale else 1f,
+        animationSpec = when (motion) {
+            2 -> snap<Float>()
+            1 -> spring<Float>(dampingRatio = 1f, stiffness = Spring.StiffnessMedium)
+            else -> spring<Float>(dampingRatio = 0.6f, stiffness = 900f)
         },
         label = "scale"
     )
     val morph = animateFloatAsState(
         targetValue = if (focused) 1f else 0f,
-        animationSpec = if (calm) {
-            spring<Float>(dampingRatio = 1f, stiffness = Spring.StiffnessMedium)
-        } else {
-            spring<Float>(dampingRatio = 0.7f, stiffness = Spring.StiffnessMedium)
+        animationSpec = when (motion) {
+            2 -> snap<Float>()
+            1 -> spring<Float>(dampingRatio = 1f, stiffness = Spring.StiffnessMedium)
+            else -> spring<Float>(dampingRatio = 0.75f, stiffness = 1200f)
         },
         label = "morph"
     )
@@ -114,7 +118,31 @@ fun FocusSurface(
             }
             .onFocusChanged { state ->
                 focused = state.isFocused
+                if (!state.isFocused) downSeen[0] = false
                 onFocusChange(state.isFocused)
+            }
+            .onPreviewKeyEvent { event ->
+                val isOk = event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter
+                if (!isOk) {
+                    false
+                } else {
+                    when (event.type) {
+                        KeyEventType.KeyDown -> {
+                            if (event.nativeKeyEvent.repeatCount == 0) {
+                                downSeen[0] = true
+                                false
+                            } else {
+                                !downSeen[0]
+                            }
+                        }
+                        KeyEventType.KeyUp -> {
+                            val had = downSeen[0]
+                            downSeen[0] = false
+                            !had
+                        }
+                        else -> false
+                    }
+                }
             }
             .onKeyEvent { event ->
                 if (onLongClick != null && event.type == KeyEventType.KeyUp &&

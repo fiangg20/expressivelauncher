@@ -57,7 +57,7 @@ class MainActivity : ComponentActivity() {
             }
             LauncherTheme(
                 accentIndex = settings.accent,
-                calmMotion = settings.calmMotion,
+                motion = settings.motion,
                 wallpaperSeed = seed
             ) {
                 LauncherScreen(viewModel)
@@ -78,6 +78,16 @@ class MainActivity : ComponentActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (viewModel.wakeIfAmbient()) return true
         viewModel.touch()
+        val isOk = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+            event.keyCode == KeyEvent.KEYCODE_ENTER ||
+            event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+        if (isOk) {
+            val consumed = viewModel.handleOk(
+                down = event.action == KeyEvent.ACTION_DOWN,
+                up = event.action == KeyEvent.ACTION_UP
+            )
+            if (consumed) return true
+        }
         if (event.keyCode == KeyEvent.KEYCODE_MENU || event.keyCode == KeyEvent.KEYCODE_SETTINGS) {
             if (event.action == KeyEvent.ACTION_UP) viewModel.toggleQuick()
             return true

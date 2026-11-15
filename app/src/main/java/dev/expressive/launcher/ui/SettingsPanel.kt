@@ -34,6 +34,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -85,6 +86,7 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material3.Slider
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
@@ -105,6 +107,9 @@ import kotlinx.coroutines.delay
 enum class SettingsPage(val title: String) {
     Root("Settings"),
     Quick("Quick settings"),
+    Presets("Presets"),
+    Collections("Collections"),
+    Widgets("Weather and name"),
     Wallpaper("Wallpaper"),
     Appearance("Appearance"),
     Home("Home screen"),
@@ -119,6 +124,7 @@ sealed interface Sidebar {
     data object Search : Sidebar
     data class Rename(val app: AppEntry) : Sidebar
     data class Categorize(val app: AppEntry) : Sidebar
+    data class Collect(val app: AppEntry) : Sidebar
 }
 
 class SidebarActions(
@@ -137,13 +143,18 @@ class SidebarActions(
     val moveFavorite: (String, Int) -> Unit,
     val assistant: () -> Unit,
     val ambientNow: () -> Unit,
-    val setCategory: (String, Int?) -> Unit
+    val setCategory: (String, Int?) -> Unit,
+    val lookupCity: (String) -> Unit,
+    val toggleCollection: (String, String) -> Unit,
+    val createCollection: (String, String?) -> Unit,
+    val deleteCollection: (String) -> Unit
 )
 
 fun Sidebar.parent(): Sidebar = when (this) {
     is Sidebar.Settings -> if (page == SettingsPage.Root) Sidebar.Closed else Sidebar.Settings(SettingsPage.Root)
     is Sidebar.Rename -> Sidebar.Options(app)
     is Sidebar.Categorize -> Sidebar.Options(app)
+    is Sidebar.Collect -> Sidebar.Options(app)
     else -> Sidebar.Closed
 }
 
@@ -158,6 +169,7 @@ fun SidebarHost(
     favoriteOrder: List<String>,
     usage: Map<String, Int>,
     recents: List<AppEntry>,
+    collections: Map<String, List<String>>,
     photo: ImageBitmap?,
     actions: SidebarActions,
     modifier: Modifier = Modifier
@@ -174,11 +186,12 @@ fun SidebarHost(
             modifier = Modifier.safeDrawingPadding()
         ) { state ->
             when (state) {
-                is Sidebar.Settings -> SettingsPageContent(state.page, prefs, managerApps, photo, actions)
+                is Sidebar.Settings -> SettingsPageContent(state.page, prefs, managerApps, collections, photo, actions)
                 is Sidebar.Options -> OptionsPage(state.app, prefs, favorites, favoriteOrder, usage, actions)
                 Sidebar.Search -> SearchPage(managerApps, recents, prefs, actions)
                 is Sidebar.Rename -> RenamePage(state.app, actions)
                 is Sidebar.Categorize -> CategoryPage(state.app, actions)
+                is Sidebar.Collect -> CollectPage(state.app, collections, actions)
                 Sidebar.Closed -> Spacer(Modifier.fillMaxSize())
             }
         }
@@ -202,6 +215,7 @@ private fun SettingsPageContent(
     page: SettingsPage,
     prefs: LauncherPrefs,
     managerApps: List<AppEntry>,
+    collections: Map<String, List<String>>,
     photo: ImageBitmap?,
     actions: SidebarActions
 ) {
@@ -226,6 +240,9 @@ private fun SettingsPageContent(
         when (page) {
             SettingsPage.Root -> RootPage(prefs, managerApps, first, actions)
             SettingsPage.Quick -> QuickPage(first, actions)
+            SettingsPage.Widgets -> WidgetsPage(prefs, first, actions)
+            SettingsPage.Presets -> PresetsPage(first, actions)
+            SettingsPage.Collections -> CollectionsPage(collections, first, actions)
             SettingsPage.Wallpaper -> WallpaperPage(prefs, photo, first, actions)
             SettingsPage.Appearance -> AppearancePage(prefs, first, actions)
             SettingsPage.Home -> HomePage(prefs, first, actions)
@@ -251,11 +268,17 @@ private fun RootPage(
     NavItem("Quick settings", "Volume, assistant, ambient clock", Icons.Rounded.Tune, first) {
         actions.navigate(Sidebar.Settings(SettingsPage.Quick))
     }
+    NavItem("Presets", "Switch the whole look in one tap", Icons.Rounded.AutoAwesome, null) {
+        actions.navigate(Sidebar.Settings(SettingsPage.Presets))
+    }
     NavItem("Wallpaper", wallpaperName, Icons.Rounded.Photo, null) {
         actions.navigate(Sidebar.Settings(SettingsPage.Wallpaper))
     }
     NavItem("Appearance", "Accent, icon shape, clock", Icons.Rounded.Palette, null) {
         actions.navigate(Sidebar.Settings(SettingsPage.Appearance))
+    }
+    NavItem("Weather and name", "Weather in the header, your name", Icons.Rounded.WbSunny, null) {
+        actions.navigate(Sidebar.Settings(SettingsPage.Widgets))
     }
     NavItem("Home screen", "Cards, rows and sorting", Icons.Rounded.Dashboard, null) {
         actions.navigate(Sidebar.Settings(SettingsPage.Home))
@@ -373,9 +396,9 @@ private fun AppearancePage(prefs: LauncherPrefs, first: FocusRequester, actions:
             }
         }
     }
-    SideLabel("Motion")
-    ChoiceGroup(listOf("Expressive", "Calm"), if (prefs.calmMotion) 1 else 0, null) { index ->
-        actions.edit { it.copy(calmMotion = index == 1) }
+    SideLabel("Motion (Minimal is best for slower TVs)")
+    ChoiceGroup(listOf("Expressive", "Calm", "Minimal"), prefs.motion, null) { index ->
+        actions.edit { it.copy(motion = index) }
     }
     SideLabel("Clock")
     ChoiceGroup(listOf("Large", "Compact", "Off"), prefs.clockMode, null) { index ->
@@ -422,6 +445,15 @@ private fun HomePage(prefs: LauncherPrefs, first: FocusRequester, actions: Sideb
     }
     SwitchItem("Most used", "Apps you open the most", prefs.showMostUsed, null) {
         actions.edit { it.copy(showMostUsed = !it.showMostUsed) }
+    }
+    SwitchItem("Collections", "Rows you create yourself", prefs.showCollections, null) {
+        actions.edit { it.copy(showCollections = !it.showCollections) }
+    }
+    SwitchItem("TV inputs", "HDMI and other inputs, on TVs", prefs.showInputs, null) {
+        actions.edit { it.copy(showInputs = !it.showInputs) }
+    }
+    NavItem("Manage collections", null, Icons.Rounded.Dashboard, null) {
+        actions.navigate(Sidebar.Settings(SettingsPage.Collections))
     }
     SideLabel("Sort all apps")
     ChoiceGroup(listOf("A to Z", "Newest", "Most used"), prefs.sort, null) { index ->
@@ -611,6 +643,12 @@ private fun OptionsPage(
             subtitle = AppCategories.name(app.category) + if (app.category != app.autoCategory) " (custom)" else " (automatic)",
             icon = Icons.Rounded.Apps,
             onClick = { actions.navigate(Sidebar.Categorize(app)) }
+        )
+        SideItem(
+            title = "Collections",
+            subtitle = "Add this app to your own rows",
+            icon = Icons.Rounded.Dashboard,
+            onClick = { actions.navigate(Sidebar.Collect(app)) }
         )
         SideItem(
             title = "Hide from home screen",
@@ -1219,5 +1257,208 @@ private fun CategoryPage(app: AppEntry, actions: SidebarActions) {
                 }
             )
         }
+    }
+}
+
+@Composable
+private fun WidgetsPage(prefs: LauncherPrefs, first: FocusRequester, actions: SidebarActions) {
+    var city by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf(prefs.userName) }
+    SwitchItem(
+        "Show weather",
+        if (prefs.weatherName.isBlank()) "Set a city first" else prefs.weatherName,
+        prefs.showWeather,
+        first
+    ) {
+        actions.edit { it.copy(showWeather = !it.showWeather) }
+    }
+    SideLabel("City")
+    TextField(
+        value = city,
+        onValueChange = { city = it },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        shape = RoundedCornerShape(26.dp),
+        placeholder = { Text("Search for a city") },
+        colors = fieldColors(),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { actions.lookupCity(city) })
+    )
+    SideItem(
+        title = "Find city",
+        icon = Icons.Rounded.Search,
+        onClick = { actions.lookupCity(city) }
+    )
+    SideLabel("Units")
+    ChoiceGroup(listOf("Celsius", "Fahrenheit"), if (prefs.fahrenheit) 1 else 0, null) { index ->
+        actions.edit { it.copy(fahrenheit = index == 1) }
+    }
+    SideLabel("Your name")
+    TextField(
+        value = name,
+        onValueChange = { text ->
+            name = text
+            actions.edit { it.copy(userName = text) }
+        },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        shape = RoundedCornerShape(26.dp),
+        placeholder = { Text("Shown in the greeting") },
+        colors = fieldColors()
+    )
+    Text(
+        text = "Weather comes from open-meteo.com. No account needed.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 4.dp, top = 12.dp)
+    )
+}
+
+private class Preset(val title: String, val subtitle: String, val transform: (LauncherPrefs) -> LauncherPrefs)
+
+private val Presets = listOf(
+    Preset("Default", "Banner cards, bouncy motion, violet") { p ->
+        LauncherPrefs().copy(
+            hidden = p.hidden, showSystem = p.showSystem, userName = p.userName,
+            showWeather = p.showWeather, weatherName = p.weatherName,
+            weatherLat = p.weatherLat, weatherLon = p.weatherLon, fahrenheit = p.fahrenheit
+        )
+    },
+    Preset("Cinema", "Large cards, dark, calm, no clutter") { p ->
+        p.copy(
+            wallpaper = "mono", dim = 2, accent = 3, iconShape = 0, motion = 1, clockMode = 1,
+            cardStyle = 0, cardSize = 2, showLabels = false, showFavorites = true, showRecent = false,
+            showMostUsed = false, showAllRow = true, groupCategories = false, showStatus = true
+        )
+    },
+    Preset("Minimal", "Small icons, fewest rows, fastest") { p ->
+        p.copy(
+            wallpaper = "ink", dim = 2, accent = 5, iconShape = 0, motion = 2, clockMode = 1,
+            cardStyle = 1, cardSize = 0, showLabels = false, showFavorites = true, showRecent = false,
+            showMostUsed = false, showAllRow = true, groupCategories = false, showStatus = false
+        )
+    },
+    Preset("Classic grid", "Big icons, grouped by category") { p ->
+        p.copy(
+            wallpaper = "fjord", dim = 1, accent = 4, iconShape = 0, motion = 0, clockMode = 0,
+            cardStyle = 1, cardSize = 2, showLabels = true, showFavorites = true, showRecent = true,
+            showMostUsed = false, showAllRow = true, groupCategories = true
+        )
+    },
+    Preset("Playful", "Cookie icons, rose, bouncy") { p ->
+        p.copy(
+            wallpaper = "plum", dim = 1, accent = 2, iconShape = 2, motion = 0, clockMode = 0,
+            cardStyle = 1, cardSize = 1, showLabels = true, showFavorites = true, showRecent = true,
+            groupCategories = false
+        )
+    },
+    Preset("Night", "Dark, graphite, ambient clock after 2 min") { p ->
+        p.copy(
+            wallpaper = "mono", dim = 2, accent = 5, motion = 1, clockMode = 0, ambient = 1,
+            cardStyle = 0, cardSize = 1, showLabels = true
+        )
+    }
+)
+
+@Composable
+private fun PresetsPage(first: FocusRequester, actions: SidebarActions) {
+    SideLabel("Apply a look")
+    Presets.forEachIndexed { index, preset ->
+        SideItem(
+            title = preset.title,
+            subtitle = preset.subtitle,
+            icon = Icons.Rounded.AutoAwesome,
+            requester = if (index == 0) first else null,
+            onClick = {
+                actions.edit { preset.transform(it) }
+                actions.close()
+            }
+        )
+    }
+}
+
+@Composable
+private fun CollectionsPage(
+    collections: Map<String, List<String>>,
+    first: FocusRequester,
+    actions: SidebarActions
+) {
+    if (collections.isEmpty()) {
+        Text(
+            text = "No collections yet. Hold OK on an app, choose Collections, and create one.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, top = 12.dp)
+        )
+    }
+    collections.entries.toList().forEachIndexed { index, entry ->
+        SideItem(
+            title = entry.key,
+            subtitle = entry.value.size.toString() + " apps. Select to delete.",
+            icon = Icons.Rounded.Delete,
+            tint = MaterialTheme.colorScheme.error,
+            requester = if (index == 0) first else null,
+            onClick = { actions.deleteCollection(entry.key) }
+        )
+    }
+}
+
+@Composable
+private fun CollectPage(
+    app: AppEntry,
+    collections: Map<String, List<String>>,
+    actions: SidebarActions
+) {
+    var name by remember { mutableStateOf("") }
+    val first = rememberFirstFocus("collect:" + app.packageName)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        PageHeader("Collections") { actions.navigate(Sidebar.Options(app)) }
+        collections.entries.toList().forEachIndexed { index, entry ->
+            val inside = app.packageName in entry.value
+            SideItem(
+                title = entry.key,
+                subtitle = entry.value.size.toString() + " apps",
+                requester = if (index == 0) first else null,
+                trailing = if (inside) {
+                    { CheckMark() }
+                } else {
+                    null
+                },
+                onClick = { actions.toggleCollection(entry.key, app.packageName) }
+            )
+        }
+        SideLabel("New collection")
+        TextField(
+            value = name,
+            onValueChange = { name = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(if (collections.isEmpty()) Modifier.focusRequester(first) else Modifier),
+            singleLine = true,
+            shape = RoundedCornerShape(26.dp),
+            placeholder = { Text("Name, for example Kids") },
+            colors = fieldColors(),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(
+                onDone = {
+                    actions.createCollection(name, app.packageName)
+                    name = ""
+                }
+            )
+        )
+        SideItem(
+            title = "Create and add this app",
+            icon = Icons.Rounded.Check,
+            onClick = {
+                actions.createCollection(name, app.packageName)
+                name = ""
+            }
+        )
     }
 }

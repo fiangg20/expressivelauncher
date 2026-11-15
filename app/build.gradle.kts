@@ -16,12 +16,25 @@ android {
         targetSdk = 36
     }
 
+    signingConfigs {
+        create("launcher") {
+            storeFile = file("launcher.jks")
+            storePassword = "android"
+            keyAlias = "launcher"
+            keyPassword = "android"
+            storeType = "jks"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("launcher")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("launcher")
         }
     }
 

@@ -10,6 +10,7 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -74,6 +75,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
@@ -91,6 +93,8 @@ import dev.expressive.launcher.AppCategories
 import dev.expressive.launcher.AppEntry
 import dev.expressive.launcher.LauncherPrefs
 import dev.expressive.launcher.LauncherViewModel
+import dev.expressive.launcher.WeatherInfo
+import dev.expressive.launcher.weatherLabel
 import dev.expressive.launcher.launchApp
 import dev.expressive.launcher.launchAssistant
 import dev.expressive.launcher.openAppInfo
@@ -142,6 +146,9 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     val customCategories by viewModel.categories.collectAsStateWithLifecycle()
     val quickSignal by viewModel.quickSignal.collectAsStateWithLifecycle()
     val ambient by viewModel.ambient.collectAsStateWithLifecycle()
+    val weather by viewModel.weather.collectAsStateWithLifecycle()
+    val collections by viewModel.collections.collectAsStateWithLifecycle()
+    val inputs by viewModel.inputs.collectAsStateWithLifecycle()
     val homeSignal by viewModel.homeSignal.collectAsStateWithLifecycle()
     val prefs by viewModel.settings.collectAsStateWithLifecycle()
     val photo by viewModel.photo.collectAsStateWithLifecycle()
@@ -190,12 +197,22 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
             .mapNotNull { byPackage[it.key] }
     }
     val favoriteSet = remember(favorites) { favorites.toSet() }
+    val collectionSections = remember(byPackage, collections) {
+        collections.mapNotNull { (name, packages) ->
+            packages.mapNotNull { byPackage[it] }
+                .takeIf { it.isNotEmpty() }
+                ?.let { Section("col:" + name, name, it) }
+        }
+    }
     val sections = remember(
         prefs.showFavorites, prefs.showRecent, prefs.showMostUsed, prefs.showAllRow, prefs.groupCategories,
+        prefs.showCollections, prefs.showInputs, collectionSections, inputs,
         favoriteApps, recentApps, mostUsedApps, allApps
     ) {
         buildList {
             if (prefs.showFavorites && favoriteApps.isNotEmpty()) add(Section("favorites", "Favorites", favoriteApps))
+            if (prefs.showCollections) addAll(collectionSections)
+            if (prefs.showInputs && inputs.isNotEmpty()) add(Section("inputs", "Inputs", inputs))
             if (prefs.showRecent && recentApps.isNotEmpty()) add(Section("recent", "Recent", recentApps))
             if (prefs.showMostUsed && mostUsedApps.isNotEmpty()) add(Section("most", "Most used", mostUsedApps))
             if (prefs.showAllRow && allApps.isNotEmpty()) {
@@ -256,7 +273,7 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
     }
 
     val open: (AppEntry) -> Unit = { app ->
-        viewModel.markLaunched(app.packageName)
+        if (!app.packageName.startsWith("input:")) viewModel.markLaunched(app.packageName)
         context.launchApp(app)
     }
 
@@ -285,7 +302,11 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
             sidebar = Sidebar.Closed
             viewModel.startAmbient()
         },
-        setCategory = { packageName, id -> viewModel.setCategory(packageName, id) }
+        setCategory = { packageName, id -> viewModel.setCategory(packageName, id) },
+        lookupCity = { viewModel.lookupCity(it) },
+        toggleCollection = { name, packageName -> viewModel.toggleInCollection(name, packageName) },
+        createCollection = { name, packageName -> viewModel.createCollection(name, packageName) },
+        deleteCollection = { viewModel.deleteCollection(it) }
     )
 
     LaunchedEffect(quickSignal) {
@@ -364,6 +385,31 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .focusProperties { canFocus = !sidebarOpen }
+                .onKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyUp) {
+                        val index = when (event.key) {
+                            Key.One, Key.NumPad1 -> 0
+                            Key.Two, Key.NumPad2 -> 1
+                            Key.Three, Key.NumPad3 -> 2
+                            Key.Four, Key.NumPad4 -> 3
+                            Key.Five, Key.NumPad5 -> 4
+                            Key.Six, Key.NumPad6 -> 5
+                            Key.Seven, Key.NumPad7 -> 6
+                            Key.Eight, Key.NumPad8 -> 7
+                            Key.Nine, Key.NumPad9 -> 8
+                            else -> -1
+                        }
+                        val target = if (index >= 0) favoriteApps.getOrNull(index) else null
+                        if (target != null) {
+                            open(target)
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
                 .graphicsLayer {
                     val s = 1f - 0.03f * depth.value
                     scaleX = s
@@ -383,6 +429,7 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
                     iconShape = iconShape,
                     registry = registry,
                     status = status,
+                    weather = weather,
                     onHeaderFocused = { focused.value = null },
                     onSearch = { sidebar = Sidebar.Search },
                     onAssistant = { context.launchAssistant() },
@@ -425,7 +472,12 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
                                 registry = registry,
                                 onFocused = { focused.value = it },
                                 onOpen = open,
-                                onMenu = { sidebar = Sidebar.Options(it) }
+                                onMenu = {
+                                    if (!it.packageName.startsWith("input:")) {
+                                        sidebar = Sidebar.Options(it)
+                                        viewModel.armOkGuard()
+                                    }
+                                }
                             )
                         }
                     }
@@ -462,6 +514,7 @@ fun LauncherScreen(viewModel: LauncherViewModel) {
                 favoriteOrder = favorites,
                 usage = usage,
                 recents = searchRecents,
+                collections = collections,
                 photo = photo,
                 actions = actions,
                 modifier = Modifier.width(sidebarWidth)
@@ -545,6 +598,7 @@ private fun Header(
     iconShape: IconShape,
     registry: FocusRegistry,
     status: State<StatusInfo>,
+    weather: WeatherInfo?,
     onHeaderFocused: () -> Unit,
     onSearch: () -> Unit,
     onAssistant: () -> Unit,
@@ -557,7 +611,7 @@ private fun Header(
         verticalAlignment = Alignment.Top
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            if (prefs.clockMode != 2) Clock(clock, prefs, compact)
+            if (prefs.clockMode != 2) Clock(clock, prefs, compact, weather)
             Spotlight(
                 focused = focused,
                 favorites = favorites,
@@ -583,8 +637,10 @@ private fun Header(
 }
 
 @Composable
-private fun Clock(clock: ClockText, prefs: LauncherPrefs, compact: Boolean) {
+private fun Clock(clock: ClockText, prefs: LauncherPrefs, compact: Boolean, weather: WeatherInfo?) {
     val large = prefs.clockMode == 0
+    val weatherText = weather?.let { it.temp.toString() + "° " + weatherLabel(it.code) }
+    val infoLine = listOfNotNull(clock.date.takeIf { prefs.showDate }, weatherText).joinToString("  ·  ")
     val size = if (large) {
         if (compact) 52.sp else 72.sp
     } else {
@@ -593,7 +649,7 @@ private fun Clock(clock: ClockText, prefs: LauncherPrefs, compact: Boolean) {
     Column {
         if (prefs.showGreeting) {
             Text(
-                text = clock.greeting,
+                text = if (prefs.userName.isBlank()) clock.greeting else clock.greeting + ", " + prefs.userName.trim(),
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -620,18 +676,18 @@ private fun Clock(clock: ClockText, prefs: LauncherPrefs, compact: Boolean) {
                     modifier = Modifier.padding(bottom = if (large) 12.dp else 4.dp)
                 )
             }
-            if (!large && prefs.showDate) {
+            if (!large && infoLine.isNotEmpty()) {
                 Text(
-                    text = clock.date,
+                    text = infoLine,
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 6.dp, bottom = 6.dp)
                 )
             }
         }
-        if (large && prefs.showDate) {
+        if (large && infoLine.isNotEmpty()) {
             Text(
-                text = clock.date,
+                text = infoLine,
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -706,7 +762,11 @@ private fun Spotlight(
         modifier = Modifier.fillMaxWidth().height(if (compact) 64.dp else 80.dp),
         contentAlignment = Alignment.CenterStart
     ) {
-        Crossfade(targetState = app, animationSpec = tween(180), label = "spotlight") { target ->
+        Crossfade(
+            targetState = app,
+            animationSpec = if (LocalMotion.current == 2) snap<Float>() else tween(120),
+            label = "spotlight"
+        ) { target ->
             if (target == null) {
                 Text(
                     text = "Press down to browse your apps",
@@ -716,7 +776,7 @@ private fun Spotlight(
             } else {
                 val meta = listOfNotNull(
                     if (target.category != -1) AppCategories.name(target.category) else null,
-                    if (target.isTv) "Made for TV" else null,
+                    if (target.packageName.startsWith("input:")) "TV input" else if (target.isTv) "Made for TV" else null,
                     if (target.packageName in favorites) "Favorite" else null
                 ).joinToString(" · ").ifEmpty { hint }
                 Row(

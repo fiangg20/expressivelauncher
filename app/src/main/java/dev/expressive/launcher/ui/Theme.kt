@@ -18,7 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-val LocalCalmMotion = compositionLocalOf { false }
+val LocalMotion = compositionLocalOf { 0 }
 
 data class Accent(
     val name: String,
@@ -99,7 +99,7 @@ private val BaseTypography = Typography(
 )
 
 @Composable
-fun LauncherTheme(accentIndex: Int, calmMotion: Boolean, wallpaperSeed: Color, content: @Composable () -> Unit) {
+fun LauncherTheme(accentIndex: Int, motion: Int, wallpaperSeed: Color, content: @Composable () -> Unit) {
     val context = LocalContext.current
     val typography = remember { BaseTypography.withFamily(launcherFontFamily(context)) }
     val dynamicAccent = remember(wallpaperSeed) { accentFromSeed(wallpaperSeed) }
@@ -116,7 +116,7 @@ fun LauncherTheme(accentIndex: Int, calmMotion: Boolean, wallpaperSeed: Color, c
             onTertiaryContainer = accent.onContainer
         )
     }
-    CompositionLocalProvider(LocalCalmMotion provides calmMotion, LocalWallpaperAccent provides dynamicAccent) {
+    CompositionLocalProvider(LocalMotion provides motion, LocalWallpaperAccent provides dynamicAccent) {
         MaterialTheme(
             colorScheme = scheme,
             shapes = LauncherShapes,

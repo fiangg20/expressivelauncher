@@ -3,6 +3,7 @@ package dev.expressive.launcher
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.media.tv.TvContract
 import android.net.Uri
 import android.provider.Settings
 import android.widget.Toast
@@ -12,6 +13,14 @@ fun Context.toast(message: String) {
 }
 
 fun Context.launchApp(app: AppEntry) {
+    if (app.packageName.startsWith("input:")) {
+        val uri = TvContract.buildChannelUriForPassthroughInput(app.activityName)
+        val started = runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.isSuccess
+        if (!started) toast("Could not open that input")
+        return
+    }
     val intent = Intent(Intent.ACTION_MAIN)
         .addCategory(if (app.isTv) Intent.CATEGORY_LEANBACK_LAUNCHER else Intent.CATEGORY_LAUNCHER)
         .setComponent(ComponentName(app.packageName, app.activityName))
