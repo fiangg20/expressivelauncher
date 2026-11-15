@@ -95,6 +95,23 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    private var okHeld = false
+    private var swallowOk = false
+
+    fun handleOk(down: Boolean, up: Boolean): Boolean {
+        if (down) okHeld = true
+        val swallow = swallowOk
+        if (up) {
+            okHeld = false
+            swallowOk = false
+        }
+        return swallow
+    }
+
+    fun armOkGuard() {
+        if (okHeld) swallowOk = true
+    }
+
     fun toggleQuick() {
         _quickSignal.update { it + 1 }
     }
@@ -112,6 +129,8 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
 
     fun setForeground(value: Boolean) {
         foreground = value
+        okHeld = false
+        swallowOk = false
         touch()
         if (!value) _ambient.value = false
     }
