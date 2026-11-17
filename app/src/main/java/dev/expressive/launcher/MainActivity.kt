@@ -92,6 +92,17 @@ class MainActivity : ComponentActivity() {
             if (event.action == KeyEvent.ACTION_UP) viewModel.toggleQuick()
             return true
         }
+        val colorIndex = when (event.keyCode) {
+            KeyEvent.KEYCODE_PROG_RED -> 0
+            KeyEvent.KEYCODE_PROG_GREEN -> 1
+            KeyEvent.KEYCODE_PROG_YELLOW -> 2
+            KeyEvent.KEYCODE_PROG_BLUE -> 3
+            else -> -1
+        }
+        if (colorIndex >= 0) {
+            if (event.action == KeyEvent.ACTION_UP) viewModel.colorKey(colorIndex)
+            return true
+        }
         return super.dispatchKeyEvent(event)
     }
 

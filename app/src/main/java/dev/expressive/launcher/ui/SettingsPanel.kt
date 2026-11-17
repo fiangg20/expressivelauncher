@@ -99,6 +99,16 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import kotlin.math.roundToInt
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import dev.expressive.launcher.Scene
 import dev.expressive.launcher.AppCategories
 import dev.expressive.launcher.AppEntry
 import dev.expressive.launcher.LauncherPrefs
@@ -109,6 +119,10 @@ enum class SettingsPage(val title: String) {
     Quick("Quick settings"),
     Presets("Presets"),
     Collections("Collections"),
+    Scenes("Scenes"),
+    Keys("Color keys"),
+    Insights("Usage insights"),
+    Kids("Kids mode"),
     Widgets("Weather and name"),
     Wallpaper("Wallpaper"),
     Appearance("Appearance"),
@@ -125,6 +139,8 @@ sealed interface Sidebar {
     data class Rename(val app: AppEntry) : Sidebar
     data class Categorize(val app: AppEntry) : Sidebar
     data class Collect(val app: AppEntry) : Sidebar
+    data class SceneEditor(val app: AppEntry) : Sidebar
+    data object Pin : Sidebar
 }
 
 class SidebarActions(
@@ -147,7 +163,14 @@ class SidebarActions(
     val lookupCity: (String) -> Unit,
     val toggleCollection: (String, String) -> Unit,
     val createCollection: (String, String?) -> Unit,
-    val deleteCollection: (String) -> Unit
+    val deleteCollection: (String) -> Unit,
+    val reorder: (AppEntry) -> Unit,
+    val canReorder: () -> Boolean,
+    val saveScene: (Scene) -> Unit,
+    val deleteScene: (String) -> Unit,
+    val runScene: (String) -> Unit,
+    val setSleep: (Int) -> Unit,
+    val pickSlides: () -> Unit
 )
 
 fun Sidebar.parent(): Sidebar = when (this) {
@@ -155,6 +178,7 @@ fun Sidebar.parent(): Sidebar = when (this) {
     is Sidebar.Rename -> Sidebar.Options(app)
     is Sidebar.Categorize -> Sidebar.Options(app)
     is Sidebar.Collect -> Sidebar.Options(app)
+    is Sidebar.SceneEditor -> Sidebar.Options(app)
     else -> Sidebar.Closed
 }
 
@@ -170,6 +194,9 @@ fun SidebarHost(
     usage: Map<String, Int>,
     recents: List<AppEntry>,
     collections: Map<String, List<String>>,
+    scenes: List<Scene>,
+    sleepEnd: Long,
+    slots: Map<String, List<Int>>,
     photo: ImageBitmap?,
     actions: SidebarActions,
     modifier: Modifier = Modifier
@@ -186,12 +213,14 @@ fun SidebarHost(
             modifier = Modifier.safeDrawingPadding()
         ) { state ->
             when (state) {
-                is Sidebar.Settings -> SettingsPageContent(state.page, prefs, managerApps, collections, photo, actions)
+                is Sidebar.Settings -> SettingsPageContent(state.page, prefs, managerApps, collections, scenes, sleepEnd, usage, slots, photo, actions)
                 is Sidebar.Options -> OptionsPage(state.app, prefs, favorites, favoriteOrder, usage, actions)
                 Sidebar.Search -> SearchPage(managerApps, recents, prefs, actions)
                 is Sidebar.Rename -> RenamePage(state.app, actions)
                 is Sidebar.Categorize -> CategoryPage(state.app, actions)
                 is Sidebar.Collect -> CollectPage(state.app, collections, actions)
+                is Sidebar.SceneEditor -> SceneEditorPage(state.app, actions)
+                Sidebar.Pin -> PinPage(prefs, actions)
                 Sidebar.Closed -> Spacer(Modifier.fillMaxSize())
             }
         }
@@ -216,6 +245,10 @@ private fun SettingsPageContent(
     prefs: LauncherPrefs,
     managerApps: List<AppEntry>,
     collections: Map<String, List<String>>,
+    scenes: List<Scene>,
+    sleepEnd: Long,
+    usage: Map<String, Int>,
+    slots: Map<String, List<Int>>,
     photo: ImageBitmap?,
     actions: SidebarActions
 ) {
@@ -239,7 +272,11 @@ private fun SettingsPageContent(
         PageHeader(page.title, back)
         when (page) {
             SettingsPage.Root -> RootPage(prefs, managerApps, first, actions)
-            SettingsPage.Quick -> QuickPage(first, actions)
+            SettingsPage.Quick -> QuickPage(sleepEnd, scenes, first, actions)
+            SettingsPage.Scenes -> ScenesPage(scenes, managerApps, first, actions)
+            SettingsPage.Keys -> KeysPage(prefs, first, actions)
+            SettingsPage.Insights -> InsightsPage(usage, slots, managerApps)
+            SettingsPage.Kids -> KidsPage(prefs, managerApps, first, actions)
             SettingsPage.Widgets -> WidgetsPage(prefs, first, actions)
             SettingsPage.Presets -> PresetsPage(first, actions)
             SettingsPage.Collections -> CollectionsPage(collections, first, actions)
@@ -270,6 +307,18 @@ private fun RootPage(
     }
     NavItem("Presets", "Switch the whole look in one tap", Icons.Rounded.AutoAwesome, null) {
         actions.navigate(Sidebar.Settings(SettingsPage.Presets))
+    }
+    NavItem("Scenes", "One tap: app, volume and dimming", Icons.Rounded.PlayArrow, null) {
+        actions.navigate(Sidebar.Settings(SettingsPage.Scenes))
+    }
+    NavItem("Color keys", "Remote red, green, yellow and blue", Icons.Rounded.Tune, null) {
+        actions.navigate(Sidebar.Settings(SettingsPage.Keys))
+    }
+    NavItem("Usage insights", "Most used apps and when you use them", Icons.Rounded.Schedule, null) {
+        actions.navigate(Sidebar.Settings(SettingsPage.Insights))
+    }
+    NavItem("Kids mode", "Limit apps behind a PIN", Icons.Rounded.Lock, null) {
+        actions.navigate(Sidebar.Settings(SettingsPage.Kids))
     }
     NavItem("Wallpaper", wallpaperName, Icons.Rounded.Photo, null) {
         actions.navigate(Sidebar.Settings(SettingsPage.Wallpaper))
@@ -421,6 +470,38 @@ private fun AppearancePage(prefs: LauncherPrefs, first: FocusRequester, actions:
     ChoiceGroup(listOf("Off", "2 min", "5 min", "10 min"), prefs.ambient, null) { index ->
         actions.edit { it.copy(ambient = index) }
     }
+    SideLabel("Ambient style")
+    ChoiceGroup(listOf("Clock", "Slideshow"), prefs.ambientStyle, null) { index ->
+        actions.edit { it.copy(ambientStyle = index) }
+    }
+    SideItem(
+        title = "Choose slideshow photos",
+        subtitle = "Up to 10 photos for the ambient slideshow",
+        icon = Icons.Rounded.AddPhotoAlternate,
+        onClick = actions.pickSlides
+    )
+    SwitchItem("Day and night dimming", "Wallpaper dims in the evening by itself", prefs.autoTheme, null) {
+        actions.edit { it.copy(autoTheme = !it.autoTheme) }
+    }
+    SideLabel("Focus style")
+    ChoiceGroup(listOf("Glide", "Expand"), prefs.focusStyle, null) { index ->
+        actions.edit { it.copy(focusStyle = index) }
+    }
+    SwitchItem("Names only on focus", "Cleaner rows", prefs.focusLabels, null) {
+        actions.edit { it.copy(focusLabels = !it.focusLabels) }
+    }
+    SwitchItem("Row depth", "Dim the rows you are not in", prefs.rowDepth, null) {
+        actions.edit { it.copy(rowDepth = !it.rowDepth) }
+    }
+    SwitchItem("Neighbor ripple", "Nearby cards shrink and fade", prefs.ripple, null) {
+        actions.edit { it.copy(ripple = !it.ripple) }
+    }
+    SwitchItem("Lean and bounce", "Cards tilt, and bounce at the row end", prefs.lean, null) {
+        actions.edit { it.copy(lean = !it.lean) }
+    }
+    SwitchItem("Navigation sounds", "Uses your system sound settings", prefs.navSounds, null) {
+        actions.edit { it.copy(navSounds = !it.navSounds) }
+    }
 }
 
 @Composable
@@ -452,11 +533,23 @@ private fun HomePage(prefs: LauncherPrefs, first: FocusRequester, actions: Sideb
     SwitchItem("TV inputs", "HDMI and other inputs, on TVs", prefs.showInputs, null) {
         actions.edit { it.copy(showInputs = !it.showInputs) }
     }
+    SwitchItem("Quick row", "Wi-Fi, Bluetooth, sleep timer and more", prefs.showQuickRow, null) {
+        actions.edit { it.copy(showQuickRow = !it.showQuickRow) }
+    }
+    SwitchItem("Suggested now", "Apps you usually open at this time", prefs.showSuggested, null) {
+        actions.edit { it.copy(showSuggested = !it.showSuggested) }
+    }
+    SwitchItem("Scenes row", null, prefs.showScenes, null) {
+        actions.edit { it.copy(showScenes = !it.showScenes) }
+    }
+    SwitchItem("Collections as folders", "One tile that opens into a row", prefs.folderMode, null) {
+        actions.edit { it.copy(folderMode = !it.folderMode) }
+    }
     NavItem("Manage collections", null, Icons.Rounded.Dashboard, null) {
         actions.navigate(Sidebar.Settings(SettingsPage.Collections))
     }
     SideLabel("Sort all apps")
-    ChoiceGroup(listOf("A to Z", "Newest", "Most used"), prefs.sort, null) { index ->
+    ChoiceGroup(listOf("A to Z", "Newest", "Most used", "Custom"), prefs.sort, null) { index ->
         actions.edit { it.copy(sort = index) }
     }
     SideLabel("All apps")
@@ -643,6 +736,20 @@ private fun OptionsPage(
             subtitle = AppCategories.name(app.category) + if (app.category != app.autoCategory) " (custom)" else " (automatic)",
             icon = Icons.Rounded.Apps,
             onClick = { actions.navigate(Sidebar.Categorize(app)) }
+        )
+        if (actions.canReorder()) {
+            SideItem(
+                title = "Reorder",
+                subtitle = "Move this app with left and right",
+                icon = Icons.Rounded.SwapHoriz,
+                onClick = { actions.reorder(app) }
+            )
+        }
+        SideItem(
+            title = "Create scene",
+            subtitle = "Open it with a volume and dimming",
+            icon = Icons.Rounded.PlayArrow,
+            onClick = { actions.navigate(Sidebar.SceneEditor(app)) }
         )
         SideItem(
             title = "Collections",
@@ -1020,11 +1127,20 @@ private fun WallpaperTile(
 }
 
 @Composable
-private fun QuickPage(first: FocusRequester, actions: SidebarActions) {
+private fun QuickPage(sleepEnd: Long, scenes: List<Scene>, first: FocusRequester, actions: SidebarActions) {
     val context = LocalContext.current
     val audio = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val maxVolume = remember { audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1) }
     var volume by remember { mutableFloatStateOf(audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()) }
+    val current = System.currentTimeMillis()
+    val remaining = ((sleepEnd - current) / 60_000L).toInt() + 1
+    val selected = when {
+        sleepEnd <= current -> 0
+        remaining <= 15 -> 1
+        remaining <= 30 -> 2
+        remaining <= 60 -> 3
+        else -> 4
+    }
 
     SideLabel("Media volume")
     Row(
@@ -1053,6 +1169,39 @@ private fun QuickPage(first: FocusRequester, actions: SidebarActions) {
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface
         )
+    }
+    SideLabel("Sleep timer")
+    ChoiceGroup(listOf("Off", "15 min", "30 min", "60 min", "90 min"), selected, null) { index ->
+        actions.setSleep(
+            when (index) {
+                1 -> 15
+                2 -> 30
+                3 -> 60
+                4 -> 90
+                else -> 0
+            }
+        )
+    }
+    if (sleepEnd > current) {
+        Text(
+            text = "Ends in about $remaining min. The volume fades out, then playback pauses.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, top = 6.dp)
+        )
+    }
+    if (scenes.isNotEmpty()) {
+        SideLabel("Scenes")
+        scenes.forEach { scene ->
+            SideItem(
+                title = scene.name,
+                icon = Icons.Rounded.PlayArrow,
+                onClick = {
+                    actions.runScene(scene.name)
+                    actions.close()
+                }
+            )
+        }
     }
     SideLabel("Shortcuts")
     NavItem("Assistant", "Ask or search by voice", Icons.Rounded.Mic, null) { actions.assistant() }
@@ -1460,5 +1609,391 @@ private fun CollectPage(
                 name = ""
             }
         )
+    }
+}
+
+@Composable
+private fun ScenesPage(
+    scenes: List<Scene>,
+    apps: List<AppEntry>,
+    first: FocusRequester,
+    actions: SidebarActions
+) {
+    if (scenes.isEmpty()) {
+        Text(
+            text = "No scenes yet. Hold OK on an app, then choose Create scene.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, top = 12.dp)
+        )
+    }
+    val dimNames = listOf("No dimming", "Soft dimming", "Strong dimming")
+    scenes.forEachIndexed { index, scene ->
+        val appName = apps.firstOrNull { it.packageName == scene.packageName }?.label ?: "App missing"
+        val detail = listOfNotNull(
+            appName,
+            if (scene.volume >= 0) "Volume " + scene.volume + "%" else null,
+            if (scene.dim in 0..2) dimNames[scene.dim] else null
+        ).joinToString(" · ")
+        SideItem(
+            title = scene.name,
+            subtitle = detail,
+            icon = Icons.Rounded.PlayArrow,
+            requester = if (index == 0) first else null,
+            onClick = {
+                actions.runScene(scene.name)
+                actions.close()
+            }
+        )
+        SideItem(
+            title = "Delete " + scene.name,
+            icon = Icons.Rounded.Delete,
+            tint = MaterialTheme.colorScheme.error,
+            onClick = { actions.deleteScene(scene.name) }
+        )
+    }
+}
+
+@Composable
+private fun SceneEditorPage(app: AppEntry, actions: SidebarActions) {
+    var name by remember { mutableStateOf(app.label) }
+    var volume by remember { mutableStateOf(0) }
+    var dim by remember { mutableStateOf(0) }
+    val first = rememberFirstFocus("scene:" + app.packageName)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        PageHeader("Create scene") { actions.navigate(Sidebar.Options(app)) }
+        TextField(
+            value = name,
+            onValueChange = { name = it },
+            modifier = Modifier.fillMaxWidth().focusRequester(first),
+            singleLine = true,
+            shape = RoundedCornerShape(26.dp),
+            placeholder = { Text("Scene name") },
+            colors = fieldColors()
+        )
+        SideLabel("Volume")
+        ChoiceGroup(listOf("Keep", "20%", "40%", "60%", "80%"), volume, null) { volume = it }
+        SideLabel("Wallpaper dimming")
+        ChoiceGroup(listOf("Keep", "Off", "Soft", "Strong"), dim, null) { dim = it }
+        Spacer(Modifier.height(8.dp))
+        SideItem(
+            title = "Save scene",
+            subtitle = "Opens " + app.label,
+            icon = Icons.Rounded.Check,
+            onClick = {
+                actions.saveScene(Scene(name, app.packageName, if (volume == 0) -1 else volume * 20, dim - 1))
+                actions.close()
+            }
+        )
+    }
+}
+
+private val ColorActions = listOf(
+    "None", "Search", "Quick settings", "Settings", "Assistant",
+    "Ambient clock", "Sleep timer", "Run first scene", "Back to top"
+)
+
+@Composable
+private fun KeyRow(title: String, color: Color, value: Int, requester: FocusRequester?, onChange: (Int) -> Unit) {
+    SideItem(
+        title = title,
+        subtitle = ColorActions.getOrElse(value) { "None" } + ". Select to change.",
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(26.dp)
+                    .clip(CircleShape)
+                    .background(color)
+            )
+        },
+        requester = requester,
+        onClick = { onChange((value + 1) % ColorActions.size) }
+    )
+}
+
+@Composable
+private fun KeysPage(prefs: LauncherPrefs, first: FocusRequester, actions: SidebarActions) {
+    KeyRow("Red key", Color(0xFFE5534B), prefs.keyRed, first) { v -> actions.edit { it.copy(keyRed = v) } }
+    KeyRow("Green key", Color(0xFF4CAF7A), prefs.keyGreen, null) { v -> actions.edit { it.copy(keyGreen = v) } }
+    KeyRow("Yellow key", Color(0xFFE8B931), prefs.keyYellow, null) { v -> actions.edit { it.copy(keyYellow = v) } }
+    KeyRow("Blue key", Color(0xFF4F8CE8), prefs.keyBlue, null) { v -> actions.edit { it.copy(keyBlue = v) } }
+    Text(
+        text = "Works with remotes that have colored buttons. Menu always opens Quick settings.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 4.dp, top = 12.dp)
+    )
+}
+
+@Composable
+private fun InsightsPage(usage: Map<String, Int>, slots: Map<String, List<Int>>, apps: List<AppEntry>) {
+    val lookup = remember(apps) { apps.associateBy { it.packageName } }
+    val top = remember(usage, lookup) {
+        usage.entries.filter { it.key in lookup && it.value > 0 }.sortedByDescending { it.value }.take(8)
+    }
+    val totals = remember(slots) { List(8) { slot -> slots.values.sumOf { it[slot] } } }
+    val peak = totals.maxOrNull() ?: 0
+    SideLabel("Most opened")
+    if (top.isEmpty()) {
+        Text(
+            text = "Open some apps and your stats will appear here.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp)
+        )
+    }
+    top.forEach { entry ->
+        val app = lookup[entry.key]
+        if (app != null) {
+            SideItem(
+                title = app.label,
+                subtitle = entry.value.toString() + " opens",
+                leading = {
+                    Image(
+                        bitmap = app.icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp))
+                    )
+                },
+                onClick = {}
+            )
+        }
+    }
+    SideLabel("When you open apps")
+    Row(
+        modifier = Modifier.fillMaxWidth().height(120.dp).padding(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Bottom
+    ) {
+        totals.forEachIndexed { slot, total ->
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Bottom
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height((if (peak == 0) 4 else 4 + 80 * total / peak).dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            if (peak > 0 && total == peak) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.surfaceContainerHighest
+                        )
+                )
+                Text(
+                    text = (slot * 3).toString(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+        }
+    }
+    if (peak > 0) {
+        val busiest = totals.indexOf(peak) * 3
+        Text(
+            text = "You open apps most between $busiest:00 and ${busiest + 3}:00.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, top = 10.dp)
+        )
+    }
+}
+
+@Composable
+private fun KidsPage(prefs: LauncherPrefs, apps: List<AppEntry>, first: FocusRequester, actions: SidebarActions) {
+    var pin by remember { mutableStateOf(prefs.kidsPin) }
+    val ready = prefs.kidsPin.length == 4 && prefs.kidsApps.isNotEmpty()
+    SwitchItem(
+        "Kids mode",
+        if (ready) "Only the apps you pick show. A PIN is needed to leave." else "Set a 4 digit PIN and pick apps first",
+        prefs.kidsMode,
+        first
+    ) {
+        if (ready || prefs.kidsMode) {
+            actions.edit { it.copy(kidsMode = !it.kidsMode) }
+            actions.close()
+        }
+    }
+    SideLabel("PIN (4 digits)")
+    TextField(
+        value = pin,
+        onValueChange = { text ->
+            val digits = text.filter { it.isDigit() }.take(4)
+            pin = digits
+            actions.edit { it.copy(kidsPin = digits) }
+        },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        shape = RoundedCornerShape(26.dp),
+        placeholder = { Text("4 digits") },
+        colors = fieldColors(),
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done)
+    )
+    SideLabel("Allowed apps")
+    apps.forEach { app ->
+        val allowed = app.packageName in prefs.kidsApps
+        SideItem(
+            title = app.label,
+            leading = {
+                Image(
+                    bitmap = app.icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp))
+                )
+            },
+            trailing = {
+                Switch(
+                    checked = allowed,
+                    onCheckedChange = null,
+                    thumbContent = {
+                        Icon(
+                            imageVector = if (allowed) Icons.Rounded.Check else Icons.Rounded.Close,
+                            contentDescription = null,
+                            modifier = Modifier.size(SwitchDefaults.IconSize)
+                        )
+                    }
+                )
+            },
+            onClick = {
+                actions.edit {
+                    it.copy(kidsApps = if (allowed) it.kidsApps - app.packageName else it.kidsApps + app.packageName)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun PinKey(label: String, requester: FocusRequester?, onPress: () -> Unit) {
+    val shapeAt = remember { percentMorph(50, 34) }
+    FocusSurface(
+        modifier = Modifier.size(72.dp),
+        shapeAt = shapeAt,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        focusedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+        ringColor = MaterialTheme.colorScheme.primary,
+        ringWidth = 2.dp,
+        focusedScale = 1.08f,
+        focusRequester = requester,
+        onClick = onPress
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.align(Alignment.Center)
+        )
+    }
+}
+
+@Composable
+private fun PinPage(prefs: LauncherPrefs, actions: SidebarActions) {
+    var entered by remember { mutableStateOf("") }
+    var wrong by remember { mutableStateOf(false) }
+    val first = rememberFirstFocus("pin")
+    val press: (String) -> Unit = { digit ->
+        if (entered.length < 4) {
+            val next = entered + digit
+            wrong = false
+            if (next.length == 4) {
+                if (next == prefs.kidsPin) {
+                    actions.edit { it.copy(kidsMode = false) }
+                    actions.close()
+                } else {
+                    wrong = true
+                    entered = ""
+                }
+            } else {
+                entered = next
+            }
+        }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp)
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp) {
+                    val digit = when (event.key) {
+                        Key.Zero, Key.NumPad0 -> "0"
+                        Key.One, Key.NumPad1 -> "1"
+                        Key.Two, Key.NumPad2 -> "2"
+                        Key.Three, Key.NumPad3 -> "3"
+                        Key.Four, Key.NumPad4 -> "4"
+                        Key.Five, Key.NumPad5 -> "5"
+                        Key.Six, Key.NumPad6 -> "6"
+                        Key.Seven, Key.NumPad7 -> "7"
+                        Key.Eight, Key.NumPad8 -> "8"
+                        Key.Nine, Key.NumPad9 -> "9"
+                        else -> null
+                    }
+                    if (digit != null) {
+                        press(digit)
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "Enter PIN",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Row(
+            modifier = Modifier.padding(vertical = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            for (index in 0 until 4) {
+                Box(
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (index < entered.length) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.surfaceContainerHighest
+                        )
+                )
+            }
+        }
+        Text(
+            text = if (wrong) "Wrong PIN, try again" else " ",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error
+        )
+        Spacer(Modifier.height(10.dp))
+        listOf(
+            listOf("1", "2", "3"),
+            listOf("4", "5", "6"),
+            listOf("7", "8", "9"),
+            listOf("<", "0", "")
+        ).forEachIndexed { rowIndex, row ->
+            Row(
+                modifier = Modifier.padding(vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                row.forEachIndexed { columnIndex, label ->
+                    when (label) {
+                        "" -> Spacer(Modifier.size(72.dp))
+                        "<" -> PinKey("<", null) { entered = entered.dropLast(1) }
+                        else -> PinKey(label, if (rowIndex == 0 && columnIndex == 0) first else null) { press(label) }
+                    }
+                }
+            }
+        }
     }
 }

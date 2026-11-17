@@ -16,6 +16,8 @@ import android.graphics.drawable.Drawable
 import android.media.tv.TvInputManager
 import android.media.ExifInterface
 import android.net.Uri
+import android.media.AudioManager
+import android.view.KeyEvent
 import android.os.SystemClock
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -34,7 +36,10 @@ import kotlin.math.max
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -82,6 +87,26 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private val _inputs = MutableStateFlow<List<AppEntry>>(emptyList())
     val inputs: StateFlow<List<AppEntry>> = _inputs.asStateFlow()
 
+    private val _slots = MutableStateFlow(readSlots())
+    val slots: StateFlow<Map<String, List<Int>>> = _slots.asStateFlow()
+
+    private val _appOrder = MutableStateFlow(readList("appOrder"))
+    val appOrder: StateFlow<List<String>> = _appOrder.asStateFlow()
+
+    private val _scenes = MutableStateFlow(readScenes())
+    val scenes: StateFlow<List<Scene>> = _scenes.asStateFlow()
+
+    private val _slides = MutableStateFlow<List<ImageBitmap>>(emptyList())
+    val slides: StateFlow<List<ImageBitmap>> = _slides.asStateFlow()
+
+    private val _sleepEnd = MutableStateFlow(0L)
+    val sleepEnd: StateFlow<Long> = _sleepEnd.asStateFlow()
+
+    private val _colorKeys = MutableSharedFlow<Int>(extraBufferCapacity = 4)
+    val colorKeys: SharedFlow<Int> = _colorKeys.asSharedFlow()
+
+    private var sleepJob: Job? = null
+
     private val _weather = MutableStateFlow<WeatherInfo?>(null)
     val weather: StateFlow<WeatherInfo?> = _weather.asStateFlow()
 
@@ -96,6 +121,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
 
     init {
         if (_settings.value.wallpaper == "photo") loadPhoto()
+        viewModelScope.launch { _slides.value = withContext(Dispatchers.IO) { decodeSlides() } }
         viewModelScope.launch {
             while (true) {
                 refreshWeather()
@@ -267,6 +293,208 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         }.getOrDefault(emptyList())
     }
 
+    private fun readSlots(): Map<String, List<Int>> = runCatching {
+        val json = JSONObject(prefs.getString("slots", "{}").orEmpty())
+        val result = HashMap<String, List<Int>>()
+        for (key in json.keys()) {
+            val array = json.getJSONArray(key)
+            val counts = (0 until array.length()).map { array.getInt(it) }
+            result[key] = (counts + List(8) { 0 }).take(8)
+        }
+        result as Map<String, List<Int>>
+    }.getOrDefault(emptyMap())
+
+    private fun readScenes(): List<Scene> = runCatching {
+        val array = JSONArray(prefs.getString("scenes", "[]").orEmpty())
+        (0 until array.length()).map { index ->
+            val item = array.getJSONObject(index)
+            Scene(item.getString("name"), item.getString("pkg"), item.getInt("vol"), item.getInt("dim"))
+        }
+    }.getOrDefault(emptyList())
+
+    private fun writeScenes(list: List<Scene>) {
+        val array = JSONArray()
+        list.forEach {
+            array.put(JSONObject().put("name", it.name).put("pkg", it.packageName).put("vol", it.volume).put("dim", it.dim))
+        }
+        prefs.edit().putString("scenes", array.toString()).apply()
+    }
+
+    fun saveScene(scene: Scene) {
+        val clean = scene.copy(name = scene.name.trim())
+        if (clean.name.isEmpty()) return
+        val next = _scenes.value.filter { it.name != clean.name } + clean
+        _scenes.value = next
+        writeScenes(next)
+    }
+
+    fun deleteScene(name: String) {
+        val next = _scenes.value.filter { it.name != name }
+        _scenes.value = next
+        writeScenes(next)
+    }
+
+    fun runScene(name: String) {
+        val scene = _scenes.value.firstOrNull { it.name == name } ?: return
+        val context = getApplication<Application>()
+        if (scene.volume >= 0) {
+            val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            runCatching { audio.setStreamVolume(AudioManager.STREAM_MUSIC, max * scene.volume / 100, 0) }
+        }
+        if (scene.dim >= 0) edit { it.copy(dim = scene.dim) }
+        val app = _apps.value.firstOrNull { it.packageName == scene.packageName }
+        if (app != null) {
+            markLaunched(app.packageName)
+            context.launchApp(app)
+        }
+    }
+
+    fun runFirstScene() {
+        _scenes.value.firstOrNull()?.let { runScene(it.name) }
+    }
+
+    fun colorKey(index: Int) {
+        _colorKeys.tryEmit(index)
+    }
+
+    fun setSleep(minutes: Int) {
+        sleepJob?.cancel()
+        if (minutes <= 0) {
+            _sleepEnd.value = 0L
+            return
+        }
+        _sleepEnd.value = System.currentTimeMillis() + minutes * 60_000L
+        sleepJob = viewModelScope.launch {
+            delay(minutes * 60_000L)
+            fadeAndSleep()
+        }
+    }
+
+    fun cycleSleep() {
+        val remaining = ((_sleepEnd.value - System.currentTimeMillis()) / 60_000L).toInt()
+        val next = when {
+            _sleepEnd.value == 0L || remaining <= 0 -> 15
+            remaining <= 15 -> 30
+            remaining <= 30 -> 60
+            remaining <= 60 -> 90
+            else -> 0
+        }
+        setSleep(next)
+    }
+
+    private suspend fun fadeAndSleep() {
+        val context = getApplication<Application>()
+        val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val original = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+        for (step in 9 downTo 0) {
+            runCatching { audio.setStreamVolume(AudioManager.STREAM_MUSIC, original * step / 10, 0) }
+            delay(1200)
+        }
+        runCatching {
+            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE))
+            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE))
+            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_STOP))
+            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_STOP))
+        }
+        delay(600)
+        runCatching { audio.setStreamVolume(AudioManager.STREAM_MUSIC, original, 0) }
+        runCatching {
+            context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+        delay(800)
+        _sleepEnd.value = 0L
+        startAmbient()
+    }
+
+    fun moveInCollection(name: String, packageName: String, delta: Int) {
+        val next = LinkedHashMap(_collections.value)
+        val list = next[name].orEmpty().toMutableList()
+        val index = list.indexOf(packageName)
+        val target = index + delta
+        if (index < 0 || target !in list.indices) return
+        list.removeAt(index)
+        list.add(target, packageName)
+        next[name] = list
+        _collections.value = next
+        writeCollections(next)
+    }
+
+    fun moveInOrder(packageName: String, neighbor: String?, base: List<String>) {
+        if (neighbor == null) return
+        val known = _appOrder.value
+        val merged = (known.filter { it in base } + base.filter { it !in known }).toMutableList()
+        val first = merged.indexOf(packageName)
+        val second = merged.indexOf(neighbor)
+        if (first < 0 || second < 0) return
+        merged[first] = neighbor
+        merged[second] = packageName
+        _appOrder.value = merged
+        writeList("appOrder", merged)
+        if (_settings.value.sort != 3) edit { it.copy(sort = 3) }
+    }
+
+    private fun slideDir(): File = File(getApplication<Application>().filesDir, "slides")
+
+    private fun decodeUriRotated(uri: Uri, maxSide: Int): Bitmap? {
+        val resolver = getApplication<Application>().contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        var sample = 1
+        while (max(bounds.outWidth, bounds.outHeight) / sample > maxSide * 2) sample *= 2
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        val decoded = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) } ?: return null
+        val degrees = runCatching {
+            resolver.openInputStream(uri)?.use { stream ->
+                when (ExifInterface(stream).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            }
+        }.getOrNull() ?: 0f
+        return if (degrees != 0f) {
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, Matrix().apply { postRotate(degrees) }, true)
+        } else {
+            decoded
+        }
+    }
+
+    private fun storeSlides(uris: List<Uri>): Int {
+        val dir = slideDir()
+        dir.mkdirs()
+        dir.listFiles()?.forEach { it.delete() }
+        var saved = 0
+        for (uri in uris.take(10)) {
+            val bitmap = runCatching { decodeUriRotated(uri, 1280) }.getOrNull() ?: continue
+            File(dir, "slide_$saved.jpg").outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 86, it) }
+            saved++
+        }
+        return saved
+    }
+
+    private fun decodeSlides(): List<ImageBitmap> {
+        val files = slideDir().listFiles()?.sortedBy { it.name } ?: return emptyList()
+        return files.mapNotNull { file ->
+            runCatching {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(file.path, bounds)
+                var sample = 1
+                while (max(bounds.outWidth, bounds.outHeight) / sample > 1400) sample *= 2
+                BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })?.asImageBitmap()
+            }.getOrNull()
+        }
+    }
+
+    fun importSlides(uris: List<Uri>, onResult: (Int) -> Unit) {
+        viewModelScope.launch {
+            val count = withContext(Dispatchers.IO) { runCatching { storeSlides(uris) }.getOrDefault(0) }
+            if (count > 0) _slides.value = withContext(Dispatchers.IO) { decodeSlides() }
+            onResult(count)
+        }
+    }
+
     fun toggleQuick() {
         _quickSignal.update { it + 1 }
     }
@@ -370,6 +598,13 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         counts[packageName] = (counts[packageName] ?: 0) + 1
         _usage.value = counts
         prefs.edit().putString("usage", counts.entries.joinToString(",") { "${it.key}=${it.value}" }).apply()
+        val slot = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY) / 3
+        val slotMap = _slots.value.toMutableMap()
+        val slotCounts = (slotMap[packageName] ?: List(8) { 0 }).toMutableList()
+        slotCounts[slot] = slotCounts[slot] + 1
+        slotMap[packageName] = slotCounts
+        _slots.value = slotMap
+        prefs.edit().putString("slots", JSONObject(slotMap.mapValues { JSONArray(it.value) }).toString()).apply()
     }
 
     fun importPhoto(uri: Uri, onResult: (Boolean) -> Unit) {
@@ -402,6 +637,25 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         sort = prefs.getInt("sort", 0),
         showSystem = prefs.getBoolean("showSystem", false),
         showStatus = prefs.getBoolean("showStatus", true),
+        focusStyle = prefs.getInt("focusStyle", 0),
+        focusLabels = prefs.getBoolean("focusLabels", false),
+        navSounds = prefs.getBoolean("navSounds", false),
+        rowDepth = prefs.getBoolean("rowDepth", true),
+        ripple = prefs.getBoolean("ripple", true),
+        lean = prefs.getBoolean("lean", true),
+        showQuickRow = prefs.getBoolean("showQuickRow", true),
+        showSuggested = prefs.getBoolean("showSuggested", true),
+        showScenes = prefs.getBoolean("showScenes", true),
+        folderMode = prefs.getBoolean("folderMode", false),
+        autoTheme = prefs.getBoolean("autoTheme", false),
+        ambientStyle = prefs.getInt("ambientStyle", 0),
+        keyRed = prefs.getInt("keyRed", 1),
+        keyGreen = prefs.getInt("keyGreen", 2),
+        keyYellow = prefs.getInt("keyYellow", 5),
+        keyBlue = prefs.getInt("keyBlue", 4),
+        kidsMode = prefs.getBoolean("kidsMode", false),
+        kidsPin = prefs.getString("kidsPin", "").orEmpty(),
+        kidsApps = readList("kidsApps").toSet(),
         showCollections = prefs.getBoolean("showCollections", true),
         showInputs = prefs.getBoolean("showInputs", true),
         showWeather = prefs.getBoolean("showWeather", false),
@@ -436,6 +690,25 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             .putInt("sort", p.sort)
             .putBoolean("showSystem", p.showSystem)
             .putBoolean("showStatus", p.showStatus)
+            .putInt("focusStyle", p.focusStyle)
+            .putBoolean("focusLabels", p.focusLabels)
+            .putBoolean("navSounds", p.navSounds)
+            .putBoolean("rowDepth", p.rowDepth)
+            .putBoolean("ripple", p.ripple)
+            .putBoolean("lean", p.lean)
+            .putBoolean("showQuickRow", p.showQuickRow)
+            .putBoolean("showSuggested", p.showSuggested)
+            .putBoolean("showScenes", p.showScenes)
+            .putBoolean("folderMode", p.folderMode)
+            .putBoolean("autoTheme", p.autoTheme)
+            .putInt("ambientStyle", p.ambientStyle)
+            .putInt("keyRed", p.keyRed)
+            .putInt("keyGreen", p.keyGreen)
+            .putInt("keyYellow", p.keyYellow)
+            .putInt("keyBlue", p.keyBlue)
+            .putBoolean("kidsMode", p.kidsMode)
+            .putString("kidsPin", p.kidsPin)
+            .putString("kidsApps", p.kidsApps.joinToString(","))
             .putBoolean("showCollections", p.showCollections)
             .putBoolean("showInputs", p.showInputs)
             .putBoolean("showWeather", p.showWeather)
@@ -597,7 +870,8 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                         autoCategory = autoCategory,
                         isTv = isTv,
                         isSystem = (flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
-                            (flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0,
+                            (flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0 &&
+                            activity.packageName !in ImportantApps.packages,
                         installedAt = runCatching { pm.getPackageInfo(activity.packageName, 0).firstInstallTime }
                             .getOrDefault(0L)
                     )

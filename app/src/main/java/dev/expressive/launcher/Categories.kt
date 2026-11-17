@@ -55,3 +55,46 @@ object AppCategories {
         return -1
     }
 }
+
+object ImportantApps {
+    val packages = setOf(
+        "com.android.vending",
+        "com.google.android.youtube",
+        "com.google.android.youtube.tv",
+        "com.google.android.youtube.tvmusic",
+        "com.google.android.apps.youtube.music",
+        "com.google.android.apps.youtube.kids",
+        "com.android.chrome",
+        "com.google.android.apps.chromecast.app",
+        "com.google.android.apps.photos",
+        "com.google.android.apps.maps",
+        "com.google.android.gm",
+        "com.google.android.apps.docs",
+        "com.google.android.googlequicksearchbox",
+        "com.google.android.play.games",
+        "com.google.android.apps.nbu.files",
+        "com.android.documentsui",
+        "com.google.android.documentsui",
+        "com.android.settings",
+        "com.android.tv.settings",
+        "com.google.android.tvsettings",
+        "com.google.android.contacts",
+        "com.android.contacts",
+        "com.google.android.dialer",
+        "com.android.dialer",
+        "com.google.android.apps.messaging",
+        "com.android.mms",
+        "com.google.android.calendar",
+        "com.google.android.deskclock",
+        "com.android.deskclock",
+        "com.google.android.calculator",
+        "com.android.calculator2",
+        "com.google.android.apps.tachyon",
+        "com.netflix.ninja",
+        "com.netflix.mediaclient",
+        "com.amazon.amazonvideo.livingroom",
+        "com.disney.disneyplus",
+        "com.spotify.tv.android",
+        "com.spotify.music"
+    )
+}

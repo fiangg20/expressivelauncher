@@ -26,6 +26,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.key.Key
@@ -38,6 +39,9 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+
+private val DefaultOne: () -> Float = { 1f }
+private val DefaultZero: () -> Float = { 0f }
 
 fun FocusRequester.tryFocus(): Boolean {
     val result = runCatching { requestFocus() }
@@ -57,6 +61,10 @@ fun FocusSurface(
     focusRequester: FocusRequester? = null,
     onFocusChange: (Boolean) -> Unit = {},
     onLongClick: (() -> Unit)? = null,
+    extraScale: () -> Float = DefaultOne,
+    extraAlpha: () -> Float = DefaultOne,
+    extraRotation: () -> Float = DefaultZero,
+    extraTranslationX: () -> Float = DefaultZero,
     onClick: () -> Unit,
     content: @Composable BoxScope.() -> Unit
 ) {
@@ -95,9 +103,13 @@ fun FocusSurface(
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer {
-                val s = scale.value
+                val s = scale.value * extraScale()
                 scaleX = s
                 scaleY = s
+                alpha = extraAlpha()
+                rotationZ = extraRotation()
+                translationX = extraTranslationX()
+                compositingStrategy = CompositingStrategy.ModulateAlpha
                 shape = shapeAt(morph.value, this)
                 clip = true
             }
